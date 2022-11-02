@@ -1,5 +1,10 @@
+import logging
+
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
+
+logger = logging.getLogger(__name__)
+default_sensitivity = 0.07
 
 
 class ExtendedFrame(Frame):
@@ -25,21 +30,58 @@ class ExtendedFrame(Frame):
 
 
 class Helper:
-    _xs = []
-    _ys = []
-    _zs = []
-    _limits = (0, 0)
+    def __init__(
+            self, frames: [ExtendedFrame],
+            use_highest_keel_depth_m_as_min_depth: bool = True,
+            use_reasonable_depth_as_max_depth: bool | float = True
+    ):
+        self._low: float = 0
+        self._high: float = 0
 
-    def __init__(self, frames: [ExtendedFrame]):
-        self.frames = frames
+        self._frames = frames
+
+        self._xs: [] = []
+        self._ys: [] = []
+        self._zs: [] = []
+
+        if use_highest_keel_depth_m_as_min_depth:
+            self._low = self.max_keel_m
+            logger.debug(f'Detected {self._low} as lower border to invalid measurements')
+
+        if use_reasonable_depth_as_max_depth:
+            if type(use_reasonable_depth_as_max_depth) == bool:
+                sensitivity = default_sensitivity
+            else:
+                sensitivity = use_reasonable_depth_as_max_depth
+
+            logger.debug('{} as maximum difference'.format(f'Default of {default_sensitivity}' if type(
+                use_reasonable_depth_as_max_depth
+            ) == bool else use_reasonable_depth_as_max_depth))
+
+            self._high = self.get_max_reasonable_depth(sensitivity)
+            logger.debug(f'Detected {self._high} as upper border value to invalid measurements')
 
     @property
-    def limit(self):
-        return self._limits
+    def frames(self) -> [ExtendedFrame]:
+        return self._frames.copy()
 
-    @limit.setter
-    def limit(self, value: tuple[float, float]):
-        self._limits = value
+    @property
+    def min_depth(self) -> float:
+        return self._low
+
+    @min_depth.setter
+    def min_depth(self, value: float):
+        self._validate_depth(value)
+        self._low = value
+
+    @property
+    def max_depth(self) -> float:
+        return self._high
+
+    @max_depth.setter
+    def max_depth(self, value: float):
+        self._validate_depth(value)
+        self._high = value
 
     @property
     def limited_frames(self):
@@ -72,14 +114,35 @@ class Helper:
     def z_set(self):
         return list({*self.z_vector})
 
+    @property
+    def max_keel_m(self) -> float:
+        return max(map(lambda f: f.keel_depth_m, self.frames))
+
+    def get_max_reasonable_depth(self, sensitivity: float) -> float:
+        ordered_depths: [float] = sorted(
+            set(filter(lambda m: m > self._low, map(lambda f: f.actual_water_depth_m, self.frames)))
+        )
+
+        return next(
+            (cur_d for cur_d, next_d in zip(ordered_depths, ordered_depths[1:]) if next_d - cur_d >= sensitivity),
+            ordered_depths[-1]
+        )
+
     def clear(self):
         self._xs.clear()
         self._ys.clear()
         self._zs.clear()
 
+    @staticmethod
+    def _validate_depth(value: float):
+        if value < 0:
+            raise ValueError('Depth cannot be negative')
+
     def _limited_frames(self) -> ['ExtendedFrame']:
-        low, high = self._limits
-        return list(filter(lambda f: low == high or low <= f.actual_water_depth_m <= high, self.frames))
+        if self._low >= self._high:
+            return self.frames
+
+        return list(filter(lambda f: self._low < f.actual_water_depth_m <= self._high, self.frames))
 
     def _build_vectors(self):
         if self._xs:

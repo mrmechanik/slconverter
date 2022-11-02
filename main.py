@@ -1,39 +1,69 @@
+import logging.config
+
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from models import ExtendedFrame, Helper
-from io import load_files
+from slio import load_files
+
+logger = logging.getLogger(__name__)
+logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 
 def test():
     frame_dict = load_files('data')
+
     frames: [ExtendedFrame] = []
 
     for f in frame_dict.values():
         frames.extend(f)
 
     h = Helper(frames)
-    h.limit = (0.6, 1.9)
     xs = h.x_vector
     ys = h.y_vector
     zs = h.z_vector
 
-    fig = plt.figure(figsize=(40, 40))
+    dim = (2, 2)
+    fig = plt.figure(figsize=(20, 20))
 
-    ax = fig.add_subplot(2, 2, 1)
-    ax.plot(h.z_set)
+    ax1 = fig.add_subplot(*dim, 1, title='Depth Distribution')
+    sns.kdeplot(zs, ax=ax1)
 
-    ax = fig.add_subplot(2, 2, 2)
-    ax.plot(xs, ys)
+    ax2 = fig.add_subplot(*dim, 2, title='Water Body Coverage')
+    ax2.plot(xs, ys)
 
-    ax = fig.add_subplot(2, 2, 3, projection='3d')
-    ax.plot_trisurf(xs, ys, zs, cmap='jet')
+    ax3 = fig.add_subplot(*dim, 3, title='3D Visualization', projection='3d')
+    ax3.plot_trisurf(xs, ys, list(map(lambda v: 0 - v, zs)), cmap='jet', edgecolor='none')
 
-    ax = fig.add_subplot(2, 2, 4)
-    ax.tricontour(xs, ys, zs, cmap='jet')
-    ax.tricontourf(xs, ys, zs, cmap='jet')
+    ax4 = fig.add_subplot(*dim, 4, title='Bathymetric Map')
+    ax4.tricontourf(xs, ys, zs, cmap='jet')
 
     plt.show()
 
 
 if __name__ == '__main__':
+    logging.config.dictConfig({
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'default': {
+                'format': '[%(levelname)s] [%(asctime)s] : %(message)s < @%(name)s:%(lineno)s',
+                'datefmt': '%d.%m.%Y %H:%M:%S'
+            }
+        },
+        'handlers': {
+            'default': {
+                'level': 'DEBUG',
+                'formatter': 'default',
+                'class': 'logging.StreamHandler'
+            }
+        },
+        'loggers': {
+            '': {
+                'handlers': ['default'],
+                'level': 'DEBUG',
+                'propagate': False
+            },
+        }
+    })
     test()
