@@ -7,42 +7,31 @@ logger = logging.getLogger(__name__)
 default_sensitivity = 0.07
 
 
-class ExtendedFrame(Frame):
+class ExtractedFrame:
     def __init__(self, frame: Frame):
-        super().__init__()
-
-        for key, value in frame.to_dict().items():
-            try:
-                setattr(self, key, value)
-            except AttributeError:
-                pass
-
-    @property
-    def keel_depth_m(self) -> float:
-        return self.keel_depth * FEET_CONVERSION if hasattr(self, 'keel_depth') else 0
-
-    @property
-    def actual_water_depth_m(self) -> float:
-        return self.water_depth_m + self.keel_depth_m
+        self.keel_depth_m: float = frame.keel_depth * FEET_CONVERSION if hasattr(frame, 'keel_depth') else 0
+        self.actual_water_depth_m: float = frame.water_depth_m + self.keel_depth_m
+        self.latitude = frame.latitude
+        self.longitude = frame.longitude
 
     def __repr__(self):
         return '{:.2f}'.format(self.actual_water_depth_m)
 
 
-class Helper:
+class FrameGroup:
     def __init__(
-            self, frames: [ExtendedFrame],
+            self, frames: [ExtractedFrame],
             use_highest_keel_depth_m_as_min_depth: bool = True,
             use_reasonable_depth_as_max_depth: bool | float = True
     ):
         self._low: float = 0
         self._high: float = 0
 
-        self._frames = frames
+        self._frames: [ExtractedFrame] = frames
 
-        self._xs: [] = []
-        self._ys: [] = []
-        self._zs: [] = []
+        self._xs: [float] = []
+        self._ys: [float] = []
+        self._zs: [float] = []
 
         if use_highest_keel_depth_m_as_min_depth:
             self._low = self.max_keel_m
@@ -62,7 +51,7 @@ class Helper:
             logger.debug(f'Detected {self._high} as upper border value to invalid measurements')
 
     @property
-    def frames(self) -> [ExtendedFrame]:
+    def frames(self) -> [ExtractedFrame]:
         return self._frames.copy()
 
     @property
@@ -138,7 +127,7 @@ class Helper:
         if value < 0:
             raise ValueError('Depth cannot be negative')
 
-    def _limited_frames(self) -> ['ExtendedFrame']:
+    def _limited_frames(self) -> [ExtractedFrame]:
         if self._low >= self._high:
             return self.frames
 
@@ -150,7 +139,7 @@ class Helper:
 
         any(map(self._split_row, self._limited_frames()))
 
-    def _split_row(self, frame: ExtendedFrame):
+    def _split_row(self, frame: ExtractedFrame):
         self._xs.append(frame.latitude)
         self._ys.append(frame.longitude)
         self._zs.append(frame.actual_water_depth_m)

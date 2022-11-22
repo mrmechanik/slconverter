@@ -2,8 +2,11 @@ import logging.config
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d import Axes3D
 
-from models import ExtendedFrame, Helper
+from models import ExtractedFrame, FrameGroup
 from slio import load_files
 
 logger = logging.getLogger(__name__)
@@ -13,29 +16,33 @@ logging.getLogger('matplotlib').setLevel(logging.INFO)
 def test():
     frame_dict = load_files('data')
 
-    frames: [ExtendedFrame] = []
+    frames: [ExtractedFrame] = []
 
     for f in frame_dict.values():
         frames.extend(f)
 
-    h = Helper(frames)
+    h = FrameGroup(frames)
     xs = h.x_vector
     ys = h.y_vector
     zs = h.z_vector
 
     dim = (2, 2)
-    fig = plt.figure(figsize=(20, 20))
+    fig: Figure = plt.figure(figsize=(20, 20))
 
-    ax1 = fig.add_subplot(*dim, 1, title='Depth Distribution')
+    logger.debug('Generating Plot 1')
+    ax1: Axes = fig.add_subplot(*dim, 1, title='Depth Distribution')
     sns.kdeplot(zs, ax=ax1)
 
-    ax2 = fig.add_subplot(*dim, 2, title='Water Body Coverage')
+    logger.debug('Generating Plot 2')
+    ax2: Axes = fig.add_subplot(*dim, 2, title='Water Body Coverage')
     ax2.plot(xs, ys)
 
-    ax3 = fig.add_subplot(*dim, 3, title='3D Visualization', projection='3d')
+    logger.debug('Generating Plot 3')
+    ax3: Axes3D = fig.add_subplot(*dim, 3, title='3D Visualization', projection='3d')
     ax3.plot_trisurf(xs, ys, list(map(lambda v: 0 - v, zs)), cmap='jet', edgecolor='none')
 
-    ax4 = fig.add_subplot(*dim, 4, title='Bathymetric Map')
+    logger.debug('Generating Plot 4')
+    ax4: Axes = fig.add_subplot(*dim, 4, title='Bathymetric Map')
     ax4.tricontourf(xs, ys, zs, cmap='jet')
 
     plt.show()

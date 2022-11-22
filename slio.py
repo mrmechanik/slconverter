@@ -3,13 +3,13 @@ from pathlib import Path
 
 import sllib
 
-from models import ExtendedFrame
+from models import ExtractedFrame
 
 logger = logging.getLogger(__name__)
 SUPPORTED_TYPES = ('slg', 'sl2', 'sl3')
 
 
-def _load_file(path: str) -> [ExtendedFrame]:
+def _load_file(path: str) -> [ExtractedFrame]:
     if not Path(path).exists():
         logger.debug(f'{path} does not exist')
         raise FileNotFoundError(f'{path} does not point to an existing file')
@@ -26,12 +26,12 @@ def _load_file(path: str) -> [ExtendedFrame]:
 
     with open(path, 'rb') as f:
         reader = sllib.Reader(f)
-        frames = list(map(ExtendedFrame, reader))
+        frames = list(map(ExtractedFrame, reader))
         logger.debug(f'{len(frames)} frames found and mapped')
         return frames
 
 
-def load_files(path: str | list[str]) -> dict[str, list[ExtendedFrame]]:
+def load_files(path: str | list[str]) -> dict[str, list[ExtractedFrame]]:
     path_obj = Path(path)
 
     if path_obj.is_dir():
