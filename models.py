@@ -25,7 +25,7 @@ def proc_time_log(msg):
     return deco
 
 
-def update_and_return_group(func):
+def return_new_group(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs) -> 'FrameGroup':
         res: [ExtractedFrame] = func(self, *args, **kwargs)
@@ -99,7 +99,7 @@ class FrameGroup:
         return self.filter(0, max_border, sensitivity)
 
     @proc_time_log('Filtering frames...')
-    @update_and_return_group
+    @return_new_group
     def filter(
             self, min_border: float | str = auto, max_border: float | str = auto,
             sensitivity_for_max: float = default_sensitivity
@@ -116,7 +116,7 @@ class FrameGroup:
         return list(filter(lambda f: low < f.actual_water_depth_m <= high, self._frames))
 
     @proc_time_log('Removing duplicates...')
-    @update_and_return_group
+    @return_new_group
     def uniquify(self) -> [ExtractedFrame]:
         uniques: set = set()
         uniques_add = uniques.add
@@ -124,10 +124,13 @@ class FrameGroup:
         logger.debug(f'Reduced {len(self._frames)} frames to {len(ordered_uniques)} frames')
         return ordered_uniques
 
-    @update_and_return_group
-    def normalize(self, min_x: float | str = auto, min_y: float | str = auto) -> [ExtractedFrame]:
+    @return_new_group
+    def normalize(
+            self, min_x: float | str = auto, min_y: float | str = auto, scale: float | str = auto
+    ) -> [ExtractedFrame]:
         self.__validate_param(min_x)
         self.__validate_param(min_y)
+        self.__validate_param(scale)
 
         if min_x == auto:
             min_x = min(map(lambda f: f.latitude, self._frames))
@@ -135,12 +138,22 @@ class FrameGroup:
         if min_y == auto:
             min_y = min(map(lambda f: f.longitude, self._frames))
 
-        return list(map(lambda f: self.__normalize_row(min_x, min_y, f), self._frames))
+        if scale == auto:
+            diff_x = max(map(lambda f: f.latitude, self._frames)) - min_x
+            diff_y = max(map(lambda f: f.longitude, self._frames)) - min_y
+
+            factor = diff_x if diff_x > diff_y else diff_y
+            scale = 1
+
+            while scale * factor < 1:
+                scale *= 10
+
+        return list(map(lambda f: self.__normalize_row(min_x, min_y, scale, f), self._frames))
 
     @staticmethod
-    def __normalize_row(min_x: float, min_y: float, frame: ExtractedFrame) -> ExtractedFrame:
-        frame.latitude = frame.latitude - min_x
-        frame.longitude = frame.longitude - min_y
+    def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:
+        frame.latitude = (frame.latitude - min_x) * scale
+        frame.longitude = (frame.longitude - min_y) * scale
         return frame
 
     @staticmethod
