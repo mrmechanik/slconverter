@@ -5,9 +5,9 @@ from functools import wraps
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
 
-logger = logging.getLogger(__name__)
-default_sensitivity = 0.07
-auto = 'auto'
+logger: logging.Logger = logging.getLogger(__name__)
+default_sensitivity: float = 0.07
+auto: str = 'auto'
 
 
 def proc_time_log(msg):
@@ -17,7 +17,7 @@ def proc_time_log(msg):
             logger.debug(msg)
             timer: float = time.time()
             res = func(*args, **kwargs)
-            logger.debug(f'Took {time.time() - timer} s')
+            logger.debug('Took {:.2f}s'.format(time.time() - timer))
             return res
 
         return wrapper
@@ -35,14 +35,14 @@ def return_new_group(func):
 
 
 class ExtractedFrame:
-    def __init__(self, frame: Frame):
+    def __init__(self, frame: Frame) -> None:
         self.keel_depth_m: float = frame.keel_depth * FEET_CONVERSION if hasattr(frame, 'keel_depth') else 0
-        self.actual_water_depth_m: float = frame.water_depth_m + self.keel_depth_m
+        self.water_depth_m: float = frame.water_depth_m
         self.latitude: float = frame.latitude
         self.longitude: float = frame.longitude
 
     def __as_tuple(self) -> tuple[float, float, float, float]:
-        return self.keel_depth_m, self.actual_water_depth_m, self.latitude, self.longitude
+        return self.keel_depth_m, self.water_depth_m, self.latitude, self.longitude
 
     def __eq__(self, other) -> bool:
         return isinstance(other, self.__class__) and self.__as_tuple() == other.__as_tuple()
@@ -51,7 +51,7 @@ class ExtractedFrame:
         return hash(self.__as_tuple())
 
     def __repr__(self) -> str:
-        return '{{{:.6f} {:.6f} {:.2f}}}'.format(self.latitude, self.longitude, self.actual_water_depth_m)
+        return '{{{:.6f} {:.6f} {:.2f}}}'.format(self.latitude, self.longitude, self.water_depth_m)
 
 
 class FrameGroup:
@@ -88,8 +88,9 @@ class FrameGroup:
 
     @proc_time_log('Calculating maximum plausible depth...')
     def get_max_plausible_depth(self, low: float, sensitivity: float) -> float:
-        depths: [float] = sorted(set(filter(lambda m: m > low, map(lambda f: f.actual_water_depth_m, self._frames))))
+        depths: [float] = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self._frames))))
         max_depth = next((cur for cur, fut in zip(depths, depths[1:]) if fut - cur >= sensitivity), depths[-1])
+        logger.debug(f'Detected {max_depth} as max plausible depth for {sensitivity} as sensitivity')
         return max_depth
 
     def filter_min(self, min_border: float | str = auto) -> [ExtractedFrame]:
@@ -113,7 +114,8 @@ class FrameGroup:
         if low >= high:
             raise ValueError(f'No outliers detectable for LOW {low} and HIGH {high}')
 
-        return list(filter(lambda f: low < f.actual_water_depth_m <= high, self._frames))
+        logger.debug(f'Using {low} and {high} as border values')
+        return list(filter(lambda f: low < f.water_depth_m <= high, self._frames))
 
     @proc_time_log('Removing duplicates...')
     @return_new_group
@@ -124,6 +126,7 @@ class FrameGroup:
         logger.debug(f'Reduced {len(self._frames)} frames to {len(ordered_uniques)} frames')
         return ordered_uniques
 
+    @proc_time_log('Normalizing...')
     @return_new_group
     def normalize(
             self, min_x: float | str = auto, min_y: float | str = auto, scale: float | str = auto
@@ -148,7 +151,16 @@ class FrameGroup:
             while scale * factor < 1:
                 scale *= 10
 
+        logger.debug(f'Using {min_x} and {min_y} as minimal values and {scale} as scale factor')
         return list(map(lambda f: self.__normalize_row(min_x, min_y, scale, f), self._frames))
+
+    @proc_time_log('Filtering values...')
+    @return_new_group
+    def inspect(self, min_x: float, min_y: float, max_x: float, max_y: float):
+        if min_x >= max_x or min_y >= max_y:
+            raise ValueError('Min cannot be smaller than max')
+
+        return list(filter(lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self._frames))
 
     @staticmethod
     def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:
@@ -161,7 +173,7 @@ class FrameGroup:
         if type(param) == str and param != auto:
             raise ValueError(f'Parameters may only be floats if not set to "{auto}"')
 
-    def __validate_existence(self):
+    def __validate_existence(self) -> None:
         cur_hash = hash(tuple(self._frames))
 
         if cur_hash != self._hash or not self.__xs:
@@ -181,4 +193,4 @@ class FrameGroup:
     def __split_row(self, frame: ExtractedFrame) -> None:
         self.__xs.append(frame.latitude)
         self.__ys.append(frame.longitude)
-        self.__zs.append(frame.actual_water_depth_m)
+        self.__zs.append(frame.water_depth_m)

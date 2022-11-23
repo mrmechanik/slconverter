@@ -14,12 +14,10 @@ logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 
 def test():
-    frame_dict = load_files('data/')
+    frame_dict: dict = load_files('data/')
 
     frames: [ExtractedFrame] = []
-
-    for f in frame_dict.values():
-        frames.extend(f)
+    any(map(frames.extend, frame_dict.values()))
 
     h: FrameGroup = FrameGroup(frames).filter().uniquify().normalize()
 
