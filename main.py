@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d import Axes3D
 
 from models import ExtractedFrame, FrameGroup
 from slio import load_files
@@ -14,10 +13,7 @@ logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 
 def test():
-    frame_dict: dict = load_files('data/')
-
-    frames: [ExtractedFrame] = []
-    any(map(frames.extend, frame_dict.values()))
+    frames: dict[str, list[ExtractedFrame]] = load_files('data/')
 
     h: FrameGroup = FrameGroup(frames).filter().uniquify().normalize()
 
@@ -33,12 +29,14 @@ def test():
     ax2.plot(h.xs, h.ys)
 
     logger.debug('Generating Plot 3')
-    ax3: Axes3D = fig.add_subplot(*dim, 3, title='3D Visualization', projection='3d')
-    ax3.plot_trisurf(h.xs, h.ys, list(map(lambda v: 0 - v, h.zs)), cmap='jet', edgecolor='none')
+    ax3: Axes = fig.add_subplot(*dim, 3, title='Normal Interpolated Bathymetric Map')
+    ax3.tricontourf(h.xs, h.ys, h.zs, cmap='jet')
 
     logger.debug('Generating Plot 4')
-    ax4: Axes = fig.add_subplot(*dim, 4, title='Bathymetric Map')
-    ax4.tricontourf(h.xs, h.ys, h.zs, cmap='jet')
+    hull = h.get_hull()
+    ax4: Axes = fig.add_subplot(*dim, 4, title='Convex Hull')
+    ax4.plot(h.xs, h.ys, color='red')
+    ax4.plot(hull.points[hull.vertices, 0], hull.points[hull.vertices, 1])
 
     plt.show()
 

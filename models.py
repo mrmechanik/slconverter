@@ -1,6 +1,7 @@
 import logging
 import time
 from functools import wraps
+from scipy.spatial import ConvexHull
 
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
@@ -28,7 +29,7 @@ def proc_time_log(msg):
 def return_new_group(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs) -> 'FrameGroup':
-        res: [ExtractedFrame] = func(self, *args, **kwargs)
+        res: list[ExtractedFrame] = func(self, *args, **kwargs)
         return FrameGroup(res)
 
     return wrapper
@@ -40,31 +41,35 @@ class ExtractedFrame:
         self.water_depth_m: float = frame.water_depth_m
         self.latitude: float = frame.latitude
         self.longitude: float = frame.longitude
+        self.timestamp: int = frame.time1
 
-    def __as_tuple(self) -> tuple[float, float, float, float]:
+    def __as_data_tuple(self) -> tuple[float, float, float, float]:
         return self.keel_depth_m, self.water_depth_m, self.latitude, self.longitude
 
+    def as_pos(self):
+        return self.latitude, self.longitude
+
     def __eq__(self, other) -> bool:
-        return isinstance(other, self.__class__) and self.__as_tuple() == other.__as_tuple()
+        return isinstance(other, self.__class__) and self.__as_data_tuple() == other.__as_data_tuple()
 
     def __hash__(self) -> int:
-        return hash(self.__as_tuple())
+        return hash(self.__as_data_tuple())
 
     def __repr__(self) -> str:
         return '{{{:.6f} {:.6f} {:.2f}}}'.format(self.latitude, self.longitude, self.water_depth_m)
 
 
 class FrameGroup:
-    __xs: [float] = []
-    __ys: [float] = []
-    __zs: [float] = []
+    __xs: list[float] = []
+    __ys: list[float] = []
+    __zs: list[float] = []
 
-    def __init__(self, frames: [ExtractedFrame]):
-        self._frames: [ExtractedFrame] = frames
+    def __init__(self, frames: list[ExtractedFrame] | dict[str, list[ExtractedFrame]]):
+        self._frames: list[ExtractedFrame] = self.__covert_frame_dict(frames) if type(frames) == dict else frames
         self._hash = hash(tuple(frames))
 
     @property
-    def frames(self) -> [ExtractedFrame]:
+    def frames(self) -> list[ExtractedFrame]:
         self.__validate_existence()
         return self._frames.copy()
 
@@ -83,20 +88,28 @@ class FrameGroup:
         self.__validate_existence()
         return self.__zs.copy()
 
+    @proc_time_log('Constructing hull...')
+    def get_hull(self):
+        points: list[tuple[float, float]] = list(map(lambda f: f.as_pos(), self._frames))
+        hull: ConvexHull = ConvexHull(points)
+        return hull
+
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self._frames))
 
     @proc_time_log('Calculating maximum plausible depth...')
     def get_max_plausible_depth(self, low: float, sensitivity: float) -> float:
-        depths: [float] = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self._frames))))
+        depths: list[float] = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self._frames))))
         max_depth = next((cur for cur, fut in zip(depths, depths[1:]) if fut - cur >= sensitivity), depths[-1])
         logger.debug(f'Detected {max_depth} as max plausible depth for {sensitivity} as sensitivity')
         return max_depth
 
-    def filter_min(self, min_border: float | str = auto) -> [ExtractedFrame]:
+    def filter_min(self, min_border: float | str = auto) -> list[ExtractedFrame]:
         return self.filter(min_border, 20000)
 
-    def filter_max(self, max_border: float | str = auto, sensitivity: float = default_sensitivity) -> [ExtractedFrame]:
+    def filter_max(
+            self, max_border: float | str = auto, sensitivity: float = default_sensitivity
+    ) -> list[ExtractedFrame]:
         return self.filter(0, max_border, sensitivity)
 
     @proc_time_log('Filtering frames...')
@@ -104,7 +117,7 @@ class FrameGroup:
     def filter(
             self, min_border: float | str = auto, max_border: float | str = auto,
             sensitivity_for_max: float = default_sensitivity
-    ) -> [ExtractedFrame]:
+    ) -> list[ExtractedFrame]:
         self.__validate_param(min_border)
         self.__validate_param(max_border)
 
@@ -119,10 +132,8 @@ class FrameGroup:
 
     @proc_time_log('Removing duplicates...')
     @return_new_group
-    def uniquify(self) -> [ExtractedFrame]:
-        uniques: set = set()
-        uniques_add = uniques.add
-        ordered_uniques: [float] = [f for f in self._frames if not (f in uniques or uniques_add(f))]
+    def uniquify(self) -> list[ExtractedFrame]:
+        ordered_uniques: list[ExtractedFrame] = sorted(list(set(self._frames)), key=lambda f: f.timestamp)
         logger.debug(f'Reduced {len(self._frames)} frames to {len(ordered_uniques)} frames')
         return ordered_uniques
 
@@ -130,7 +141,7 @@ class FrameGroup:
     @return_new_group
     def normalize(
             self, min_x: float | str = auto, min_y: float | str = auto, scale: float | str = auto
-    ) -> [ExtractedFrame]:
+    ) -> list[ExtractedFrame]:
         self.__validate_param(min_x)
         self.__validate_param(min_y)
         self.__validate_param(scale)
@@ -161,6 +172,25 @@ class FrameGroup:
             raise ValueError('Min cannot be smaller than max')
 
         return list(filter(lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self._frames))
+
+    @staticmethod
+    @proc_time_log('Reducing to list & updating timestamps...')
+    def __covert_frame_dict(frames: dict[str, list[ExtractedFrame]]) -> list[ExtractedFrame]:
+        internal_frames: list[ExtractedFrame] = []
+        any(map(internal_frames.extend, frames.values()))
+
+        stamps = list(map(lambda f: f.timestamp, internal_frames))
+        stamp_offset = max(stamps) - min(stamps)
+        internal_frames: list[ExtractedFrame] = []
+
+        for idx, frame_list in enumerate(frames.values()):
+            list_offset = idx * stamp_offset
+
+            for frame in frame_list:
+                frame.timestamp += list_offset
+                internal_frames.append(frame)
+
+        return internal_frames
 
     @staticmethod
     def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:

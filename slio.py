@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_TYPES = ('slg', 'sl2', 'sl3')
 
 
-def _load_file(path: str) -> [ExtractedFrame]:
+def _load_file(path: str) -> list[ExtractedFrame]:
     if not Path(path).exists():
         logger.debug(f'{path} does not exist')
         raise FileNotFoundError(f'{path} does not point to an existing file')
@@ -36,8 +36,8 @@ def load_files(path: str | list[str]) -> dict[str, list[ExtractedFrame]]:
 
     if path_obj.is_dir():
         logger.debug(f'{path} is a directory, now searching readable files')
-        file_splits = [list(path_obj.glob(f'*.{ext}')) for ext in SUPPORTED_TYPES]
-        path = []
+        file_splits: list[list[Path]] = [list(path_obj.glob(f'*.{ext}')) for ext in SUPPORTED_TYPES]
+        path: list[str] = []
 
         for fs in file_splits:
             path.extend([str(f.absolute()) for f in fs])
@@ -46,7 +46,7 @@ def load_files(path: str | list[str]) -> dict[str, list[ExtractedFrame]]:
 
     if type(path) == str:
         logger.debug(f'Singe file input detected ({path})')
-        path = [path]
+        path: list[str] = [path]
 
     if type(path) != list:
         logger.debug(f'{path} is not a list')
