@@ -1,13 +1,15 @@
 import logging
 import time
 from functools import wraps
-from scipy.spatial import ConvexHull
 
+import alphashape
+from shapely.geometry import Polygon
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
 
 logger: logging.Logger = logging.getLogger(__name__)
 default_sensitivity: float = 0.07
+default_alpha: float = 8
 auto: str = 'auto'
 
 
@@ -60,11 +62,10 @@ class ExtractedFrame:
 
 
 class FrameGroup:
-    __xs: list[float] = []
-    __ys: list[float] = []
-    __zs: list[float] = []
-
     def __init__(self, frames: list[ExtractedFrame] | dict[str, list[ExtractedFrame]]):
+        self.__xs: list[float] = []
+        self.__ys: list[float] = []
+        self.__zs: list[float] = []
         self._frames: list[ExtractedFrame] = self.__covert_frame_dict(frames) if type(frames) == dict else frames
         self._hash = hash(tuple(frames))
 
@@ -89,10 +90,25 @@ class FrameGroup:
         return self.__zs.copy()
 
     @proc_time_log('Constructing hull...')
-    def get_hull(self):
+    @return_new_group
+    def hull(self, alpha: float | str = auto):
+        self.__validate_param(alpha)
         points: list[tuple[float, float]] = list(map(lambda f: f.as_pos(), self._frames))
-        hull: ConvexHull = ConvexHull(points)
-        return hull
+
+        if alpha == auto:
+            alpha = default_alpha
+        elif alpha < 0:
+            raise ValueError(
+                'The alpha value of an alpha shape may not be less than 0 as 0 already results in a convex hull '
+                'which would be the largest alpha shape available'
+            )
+
+        shape: Polygon = alphashape.alphashape(points, alpha)
+
+        exterior_points: list[tuple[float, float]] = list(shape.exterior.coords)
+        logger.debug(f'Hull consists of {len(exterior_points)} points based on {len(points)} points')
+        unordered_frames: list[ExtractedFrame] = list(filter(lambda f: f.as_pos() in exterior_points, self._frames))
+        return list(map(lambda pos: next((f for f in unordered_frames if f.as_pos() == pos)), exterior_points))
 
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self._frames))
@@ -203,17 +219,17 @@ class FrameGroup:
         if type(param) == str and param != auto:
             raise ValueError(f'Parameters may only be floats if not set to "{auto}"')
 
+    @proc_time_log(f'Reconstructing...')
+    def __rebuild_vectors(self) -> None:
+        self.__clear()
+        any(map(self.__split_row, self._frames))
+
     def __validate_existence(self) -> None:
         cur_hash = hash(tuple(self._frames))
 
         if cur_hash != self._hash or not self.__xs:
             self.__rebuild_vectors()
             self._hash = cur_hash
-
-    @proc_time_log(f'Reconstructing...')
-    def __rebuild_vectors(self) -> None:
-        self.__clear()
-        any(map(self.__split_row, self._frames))
 
     def __clear(self) -> None:
         self.__xs.clear()
@@ -224,3 +240,6 @@ class FrameGroup:
         self.__xs.append(frame.latitude)
         self.__ys.append(frame.longitude)
         self.__zs.append(frame.water_depth_m)
+
+    def __repr__(self) -> str:
+        return '[{}]'.format('\n'.join(map(repr, self._frames)))
