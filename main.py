@@ -12,11 +12,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 
-def test():
+def test() -> None:
     frames: dict[str, list[ExtractedFrame]] = load_files('data/')
 
     group: FrameGroup = FrameGroup(frames).filter().uniquify().normalize()
-
     dim: tuple[int, int] = (2, 2)
     fig: Figure = plt.figure(figsize=(20, 20))
 

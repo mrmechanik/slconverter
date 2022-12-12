@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from functools import wraps
 
@@ -48,7 +49,7 @@ class ExtractedFrame:
     def __as_data_tuple(self) -> tuple[float, float, float, float]:
         return self.keel_depth_m, self.water_depth_m, self.latitude, self.longitude
 
-    def as_pos(self):
+    def as_pos(self) -> tuple[float, float]:
         return self.latitude, self.longitude
 
     def __eq__(self, other) -> bool:
@@ -66,32 +67,32 @@ class FrameGroup:
         self.__xs: list[float] = []
         self.__ys: list[float] = []
         self.__zs: list[float] = []
+
         self._frames: list[ExtractedFrame] = self.__covert_frame_dict(frames) if type(frames) == dict else frames
         self._hash = hash(tuple(frames))
 
     @property
     def frames(self) -> list[ExtractedFrame]:
-        self.__validate_existence()
         return self._frames.copy()
 
     @property
     def xs(self) -> list[float]:
-        self.__validate_existence()
+        self.__validate_vectors()
         return self.__xs.copy()
 
     @property
     def ys(self) -> list[float]:
-        self.__validate_existence()
+        self.__validate_vectors()
         return self.__ys.copy()
 
     @property
     def zs(self) -> list[float]:
-        self.__validate_existence()
+        self.__validate_vectors()
         return self.__zs.copy()
 
     @proc_time_log('Constructing hull...')
     @return_new_group
-    def hull(self, alpha: float | str = auto):
+    def hull(self, alpha: float | str = auto) -> list[ExtractedFrame]:
         self.__validate_param(alpha)
         points: list[tuple[float, float]] = list(map(lambda f: f.as_pos(), self._frames))
 
@@ -110,9 +111,6 @@ class FrameGroup:
         unordered_frames: list[ExtractedFrame] = list(filter(lambda f: f.as_pos() in exterior_points, self._frames))
         return list(map(lambda pos: next((f for f in unordered_frames if f.as_pos() == pos)), exterior_points))
 
-    def get_max_keel_m(self) -> float:
-        return max(map(lambda f: f.keel_depth_m, self._frames))
-
     @proc_time_log('Calculating maximum plausible depth...')
     def get_max_plausible_depth(self, low: float, sensitivity: float) -> float:
         depths: list[float] = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self._frames))))
@@ -120,12 +118,12 @@ class FrameGroup:
         logger.debug(f'Detected {max_depth} as max plausible depth for {sensitivity} as sensitivity')
         return max_depth
 
-    def filter_min(self, min_border: float | str = auto) -> list[ExtractedFrame]:
+    def filter_min(self, min_border: float | str = auto) -> 'FrameGroup':
         return self.filter(min_border, 20000)
 
     def filter_max(
             self, max_border: float | str = auto, sensitivity: float = default_sensitivity
-    ) -> list[ExtractedFrame]:
+    ) -> 'FrameGroup':
         return self.filter(0, max_border, sensitivity)
 
     @proc_time_log('Filtering frames...')
@@ -183,11 +181,29 @@ class FrameGroup:
 
     @proc_time_log('Filtering values...')
     @return_new_group
-    def inspect(self, min_x: float, min_y: float, max_x: float, max_y: float):
+    def inspect(self, min_point: tuple[float, float], max_point: tuple[float, float]) -> list[ExtractedFrame]:
+        min_x, min_y = min_point
+        max_x, max_y = max_point
+
         if min_x >= max_x or min_y >= max_y:
             raise ValueError('Min cannot be smaller than max')
 
         return list(filter(lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self._frames))
+
+    def get_max_keel_m(self) -> float:
+        return max(map(lambda f: f.keel_depth_m, self._frames))
+
+    @staticmethod
+    def is_interior(hull: 'FrameGroup', point: tuple[float, float]) -> bool:
+        hull_pts: list[tuple[float, float]] = list(map(lambda f: f.as_pos(), hull._frames))
+        x, y = point
+
+        angle: float = sum(
+            FrameGroup.__get_angle((cur_x - x, cur_y - y), (next_x - x, next_y - y)) for
+            (cur_x, cur_y), (next_x, next_y) in zip(hull_pts, hull_pts[1:])
+        )
+
+        return not math.fabs(angle) < math.pi
 
     @staticmethod
     @proc_time_log('Reducing to list & updating timestamps...')
@@ -209,6 +225,20 @@ class FrameGroup:
         return internal_frames
 
     @staticmethod
+    def __get_angle(point1: tuple[float, float], point2: tuple[float, float]) -> float:
+        x1, y1 = point1
+        x2, y2 = point2
+        d_theta = math.atan2(y2, x2) - math.atan2(y1, x1)
+
+        while d_theta > math.pi:
+            d_theta -= math.pi * 2
+
+        while d_theta < - math.pi:
+            d_theta += math.pi * 2
+
+        return d_theta
+
+    @staticmethod
     def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:
         frame.latitude = (frame.latitude - min_x) * scale
         frame.longitude = (frame.longitude - min_y) * scale
@@ -224,7 +254,7 @@ class FrameGroup:
         self.__clear()
         any(map(self.__split_row, self._frames))
 
-    def __validate_existence(self) -> None:
+    def __validate_vectors(self) -> None:
         cur_hash = hash(tuple(self._frames))
 
         if cur_hash != self._hash or not self.__xs:
