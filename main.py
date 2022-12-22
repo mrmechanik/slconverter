@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.patches import PathPatch
 
 from models import ExtractedFrame, FrameGroup
 from slio import load_files
@@ -28,13 +29,13 @@ def test() -> None:
     ax2.plot(group.xs, group.ys)
 
     logger.debug('Generating Plot 3')
-    ax3: Axes = fig.add_subplot(*dim, 3, title='Default Interpolated Bathymetric Map')
-    ax3.tricontourf(group.xs, group.ys, group.zs, cmap='jet')
+    shape: FrameGroup = group.shape()
+    ax3: Axes = fig.add_subplot(*dim, 3, title='Estimated Water Body')
+    ax3.fill(shape.xs, shape.ys, alpha=0.2)
+    ax3.plot(shape.xs, shape.ys)
 
-    logger.debug('Generating Plot 4')
-    hull: FrameGroup = group.hull()
-    ax4: Axes = fig.add_subplot(*dim, 4, title='Hull based on Alpha Shape')
-    ax4.fill(hull.xs, hull.ys, color='red', alpha=0.2)
+    for path in shape.hole_paths:
+        ax3.add_patch(PathPatch(path, color='white'))
 
     plt.show()
 
