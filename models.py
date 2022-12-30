@@ -4,9 +4,8 @@ from functools import wraps
 from typing import Any, Callable, Optional
 
 import alphashape
-from matplotlib.patches import PathPatch
 from matplotlib.path import Path
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon, Point, LineString
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
 from triangle import triangulate
@@ -47,6 +46,7 @@ def return_new_group(
     def wrapper(self, *args, **kwargs) -> 'FrameGroup':
         res: EFs = func(self, *args, **kwargs)
         group: FrameGroup = FrameGroup(res)
+        group._hull = self._hull
         group._holes = self._holes
         return group
 
@@ -67,6 +67,9 @@ class ExtractedFrame:
     def as_pos(self) -> P:
         return self.latitude, self.longitude
 
+    def as_3d_pos(self) -> tuple[float, float, float]:
+        return self.latitude, self.longitude, self.water_depth_m
+
     def __eq__(self, other) -> bool:
         return isinstance(other, self.__class__) and self.__as_data_tuple() == other.__as_data_tuple()
 
@@ -78,12 +81,15 @@ class ExtractedFrame:
 
 
 class FrameGroup:
-    def __init__(self, frames: EFs | dict[str, EFs]):
+    def __init__(self, frames: EFs | dict[str, EFs]) -> None:
         self.__xs: Fs = []
         self.__ys: Fs = []
         self.__zs: Fs = []
+        self.__paths: list[Path] = []
+        self.__by_depths: EFs = []
+
+        self._hull: FrameGroup | None = None
         self._holes: list[FrameGroup] = []
-        self.__paths: list[PathPatch] = []
         self.__frames: EFs = self.__convert_frame_dict(frames) if type(frames) == dict else frames
         self.__hash: int = hash(tuple(frames))
 
@@ -94,7 +100,7 @@ class FrameGroup:
     @property
     def hole_paths(self) -> list[Path]:
         if not self.__paths:
-            self.__paths = list(
+            self.__paths: list[Path] = list(
                 map(lambda h: FrameGroup.__construct_hole_paths(h.__as_pos()), self._holes)
             )
 
@@ -114,6 +120,20 @@ class FrameGroup:
     def zs(self) -> Fs:
         self.__validate_vectors()
         return self.__zs.copy()
+
+    @property
+    def deepest(self) -> ExtractedFrame:
+        if not self.__by_depths:
+            self.__order_frames()
+
+        return self.__by_depths.copy()[0]
+
+    @property
+    def shallowest(self) -> ExtractedFrame:
+        if not self.__by_depths:
+            self.__order_frames()
+
+        return self.__by_depths.copy()[-1]
 
     @proc_time_log('Constructing shape...')
     @return_new_group
@@ -141,6 +161,9 @@ class FrameGroup:
             )
 
         hull_points: Ps = list(hull_poly.exterior.coords)
+        hull_frames: EFs = self.__order_and_map_points(hull_points)
+        self._hull: FrameGroup | None = FrameGroup(hull_frames)
+
         p_len: int = len(all_points)
         logger.debug(f'Hull consists of {len(hull_points)} points based on {len(all_points)} points')
 
@@ -148,15 +171,13 @@ class FrameGroup:
         vertices: Ps = delaunay['vertices']
         triangles: list[tuple[int, int, int]] = delaunay['triangles']
         indices: list[tuple[int, int, int]] = list(filter(
-            lambda idxs: self.__is_interior(hull_points, list(map(lambda i: vertices[i], idxs))), filter(
+            lambda idxs: self.is_interior(Polygon(list(map(lambda i: vertices[i], idxs)))), filter(
                 lambda idxs: not all(map(lambda i: i < p_len, idxs)), triangles
             )
         ))
         hole_points: Ps = list(
             map(lambda i: all_points[i], filter(lambda i: i < p_len, (idx for sub in indices for idx in sub)))
         )
-
-        hull_frames: EFs = self.__order_and_map_points(hull_points)
 
         if hole_points:
             self.__construct_holes(hole_points, hole_alpha)
@@ -245,6 +266,11 @@ class FrameGroup:
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self.__frames))
 
+    def is_interior(self, other: Point | LineString | Polygon) -> bool:
+        holes: list[Polygon] = list(map(lambda h: Polygon(h.__as_pos()), self._holes))
+        shape: Polygon = Polygon(shell=self._hull.__as_pos())
+        return other.within(shape) and not any(map(lambda h: other.within(h), holes))
+
     @staticmethod
     @proc_time_log('Reducing to list & updating timestamps...')
     def __convert_frame_dict(frames: dict[str, EFs]) -> EFs:
@@ -270,10 +296,6 @@ class FrameGroup:
         return Path(points, actions)
 
     @staticmethod
-    def __is_interior(hull_pts: list[P], points: list[P]) -> bool:
-        return Polygon(points).within(Polygon(hull_pts))
-
-    @staticmethod
     def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:
         frame.latitude = (frame.latitude - min_x) * scale
         frame.longitude = (frame.longitude - min_y) * scale
@@ -284,7 +306,7 @@ class FrameGroup:
         if type(param) == str and param != auto:
             raise ValueError(f'Parameters may only be numeric if not set to "{auto}"')
 
-    @proc_time_log('Constructing holes')
+    @proc_time_log('Constructing holes...')
     def __construct_holes(self, hole_points: Ps, hole_alpha: float) -> None:
         polys: MultiPolygon | Polygon | Any = alphashape.alphashape(hole_points, float(hole_alpha))
 
@@ -303,10 +325,12 @@ class FrameGroup:
             map(lambda p: FrameGroup(self.__order_and_map_points(list(reversed(p.exterior.coords)))), polys)
         )
 
-    @proc_time_log(f'Reconstructing...')
     def __rebuild_vectors(self) -> None:
         self.__clear()
         any(map(self.__split_row, self.__frames))
+
+    def __order_frames(self):
+        self.__by_depths: EFs = sorted(self.__frames, key=lambda f: f.water_depth_m)
 
     def __order_and_map_points(self, ext_points: list[P]) -> EFs:
         unordered_frames: EFs = list(filter(lambda f: f.as_pos() in ext_points, self.__frames))
@@ -326,6 +350,8 @@ class FrameGroup:
         self.__xs.clear()
         self.__ys.clear()
         self.__zs.clear()
+        self.__paths.clear()
+        self.__by_depths.clear()
 
     def __split_row(self, frame: ExtractedFrame) -> None:
         self.__xs.append(frame.latitude)

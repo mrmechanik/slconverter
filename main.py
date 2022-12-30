@@ -1,10 +1,15 @@
 import logging.config
 
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 from matplotlib.axes import Axes
+from matplotlib.colorbar import Colorbar
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
+from matplotlib.tri import Triangulation, TriContourSet
+from shapely.geometry import Polygon
 
 from models import ExtractedFrame, FrameGroup
 from slio import load_files
@@ -20,15 +25,15 @@ def test() -> None:
     dim: tuple[int, int] = (2, 2)
     fig: Figure = plt.figure(figsize=(20, 20))
 
-    logger.debug('Generating Plot 1')
+    logger.info('Generating Plot 1')
     ax1: Axes = fig.add_subplot(*dim, 1, title='Depth Distribution')
     sns.kdeplot(group.zs, ax=ax1)
 
-    logger.debug('Generating Plot 2')
+    logger.info('Generating Plot 2')
     ax2: Axes = fig.add_subplot(*dim, 2, title='Water Body Coverage')
     ax2.plot(group.xs, group.ys)
 
-    logger.debug('Generating Plot 3')
+    logger.info('Generating Plot 3')
     shape: FrameGroup = group.shape()
     ax3: Axes = fig.add_subplot(*dim, 3, title='Estimated Water Body')
     ax3.fill(shape.xs, shape.ys, alpha=0.2)
@@ -37,7 +42,36 @@ def test() -> None:
     for path in shape.hole_paths:
         ax3.add_patch(PathPatch(path, color='white'))
 
+    logger.info('Generating Plot 4')
+    xys: list[tuple[float, float]] = list(zip(group.xs, group.ys))
+    tri: Triangulation = Triangulation(group.xs, group.ys)
+    tri.set_mask(list(map(
+        lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: xys[i], idxs)))), tri.triangles
+    )))
+
+    cmap: LinearSegmentedColormap = LinearSegmentedColormap.from_list(
+        name='Water Depth', colors=['w', 'CornflowerBlue', 'DarkBlue']
+    )
+
+    lx, ly, lz = group.shallowest.as_3d_pos()
+    hx, hy, hz = group.deepest.as_3d_pos()
+
+    ax4: Axes = fig.add_subplot(*dim, 4, title='Bathymetric Map')
+    tcs: TriContourSet = ax4.tricontourf(tri, group.zs, cmap=cmap)
+
+    ax4.scatter(lx, ly, marker='x', c='orange')
+    ax4.text(lx, ly, '{:.1f} m'.format(lz), c='orange')
+    ax4.scatter(hx, hy, marker='x', c='orange')
+    ax4.text(hx, hy, '{:.1f} m'.format(hz), c='orange')
+
+    cbar: Colorbar = plt.colorbar(tcs, ax=ax4, cmap=cmap)
+    cbar.ax.set_yticklabels(
+        list(map(lambda n: round(n, 1), np.linspace(0, round(max(group.zs), 1), len(cbar.get_ticks()), endpoint=True)))
+    )
+
     plt.show()
+
+    logger.info('Plotting completed')
 
 
 if __name__ == '__main__':
@@ -62,7 +96,7 @@ if __name__ == '__main__':
                 'handlers': ['default'],
                 'level': 'DEBUG',
                 'propagate': False
-            },
+            }
         }
     })
     test()
