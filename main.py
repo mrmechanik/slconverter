@@ -8,8 +8,7 @@ from matplotlib.colorbar import Colorbar
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
-from matplotlib.tri import Triangulation, TriContourSet
-from shapely.geometry import Polygon
+from matplotlib.tri import TriContourSet
 
 from models import ExtractedFrame, FrameGroup
 from slio import load_files
@@ -21,7 +20,7 @@ logging.getLogger('matplotlib').setLevel(logging.INFO)
 def test() -> None:
     frames: dict[str, list[ExtractedFrame]] = load_files('data/')
 
-    group: FrameGroup = FrameGroup(frames).filter().uniquify().normalize()
+    group: FrameGroup = FrameGroup(frames).filter().uniquify().normalize().flip('xy')
     dim: tuple[int, int] = (2, 2)
     fig: Figure = plt.figure(figsize=(20, 20))
 
@@ -43,11 +42,6 @@ def test() -> None:
         ax3.add_patch(PathPatch(path, color='white'))
 
     logger.info('Generating Plot 4')
-    xys: list[tuple[float, float]] = list(zip(group.xs, group.ys))
-    tri: Triangulation = Triangulation(group.xs, group.ys)
-    tri.set_mask(list(map(
-        lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: xys[i], idxs)))), tri.triangles
-    )))
 
     cmap: LinearSegmentedColormap = LinearSegmentedColormap.from_list(
         name='Water Depth', colors=['w', 'CornflowerBlue', 'DarkBlue']
@@ -57,7 +51,7 @@ def test() -> None:
     hx, hy, hz = group.deepest.as_3d_pos()
 
     ax4: Axes = fig.add_subplot(*dim, 4, title='Bathymetric Map')
-    tcs: TriContourSet = ax4.tricontourf(tri, group.zs, cmap=cmap)
+    tcs: TriContourSet = ax4.tricontourf(group.triangulate(shape), group.zs, cmap=cmap)
 
     ax4.scatter(lx, ly, marker='x', c='orange')
     ax4.text(lx, ly, '{:.1f} m'.format(lz), c='orange')

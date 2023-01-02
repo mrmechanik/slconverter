@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional
 
 import alphashape
 from matplotlib.path import Path
+from matplotlib.tri import Triangulation
 from shapely.geometry import Polygon, MultiPolygon, Point, LineString
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
@@ -61,14 +62,17 @@ class ExtractedFrame:
         self.longitude: float = frame.longitude
         self.timestamp: int = frame.time1
 
-    def __as_data_tuple(self) -> tuple[float, float, float, float]:
-        return self.keel_depth_m, self.water_depth_m, self.latitude, self.longitude
-
-    def as_pos(self) -> P:
+    def as_2d_pos(self) -> P:
         return self.latitude, self.longitude
 
     def as_3d_pos(self) -> tuple[float, float, float]:
         return self.latitude, self.longitude, self.water_depth_m
+
+    def update_2d_pos(self, point: P):
+        self.latitude, self.longitude = point
+
+    def __as_data_tuple(self) -> tuple[float, float, float, float]:
+        return self.keel_depth_m, self.water_depth_m, self.latitude, self.longitude
 
     def __eq__(self, other) -> bool:
         return isinstance(other, self.__class__) and self.__as_data_tuple() == other.__as_data_tuple()
@@ -263,6 +267,41 @@ class FrameGroup:
 
         return list(filter(lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self.__frames))
 
+    @proc_time_log('Flipping points...')
+    @return_new_group
+    def flip(self, axis: str) -> 'FrameGroup':
+        if axis not in 'xy':
+            raise ValueError('Direction has to be x, y or xy')
+
+        clones: EFs = self.frames.copy()
+
+        if axis == 'xy':
+            any(map(lambda f: f.update_2d_pos(tuple(reversed(f.as_2d_pos()))), clones))
+            return clones
+
+        all_points: Ps = self.__as_pos()
+        xs, ys = list(zip(*all_points))
+        max_x: float = max(xs)
+        max_y: float = max(ys)
+
+        [f.update_2d_pos((x, max_y - y) if axis == 'x' else (max_x - x, y)) for f, (x, y) in zip(clones, all_points)]
+        return clones
+
+    @proc_time_log('Triangulating...')
+    def triangulate(self, shape: 'FrameGroup' = None) -> Triangulation:
+        if not shape:
+            shape: FrameGroup = self.shape()
+
+        all_points = self.__as_pos()
+        delaunay: dict = triangulate({'vertices': all_points}, opts='')
+        vertices: Ps = delaunay['vertices']
+        triangles: list[tuple[int, int, int]] = delaunay['triangles']
+        mask: list[bool] = list(
+            map(lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: tuple(vertices[i]), idxs)))), triangles)
+        )
+
+        return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
+
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self.__frames))
 
@@ -333,11 +372,11 @@ class FrameGroup:
         self.__by_depths: EFs = sorted(self.__frames, key=lambda f: f.water_depth_m)
 
     def __order_and_map_points(self, ext_points: list[P]) -> EFs:
-        unordered_frames: EFs = list(filter(lambda f: f.as_pos() in ext_points, self.__frames))
-        return list(map(lambda pos: next((f for f in unordered_frames if f.as_pos() == pos)), ext_points))
+        unordered_frames: EFs = list(filter(lambda f: f.as_2d_pos() in ext_points, self.__frames))
+        return list(map(lambda pos: next((f for f in unordered_frames if f.as_2d_pos() == pos)), ext_points))
 
     def __as_pos(self) -> list[P]:
-        return list(map(lambda f: f.as_pos(), self.__frames))
+        return list(map(lambda f: f.as_2d_pos(), self.__frames))
 
     def __validate_vectors(self) -> None:
         cur_hash: int = hash(tuple(self.__frames))
