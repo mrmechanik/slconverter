@@ -1,12 +1,14 @@
 import logging
 import time
 from functools import wraps
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Type, TypeVar, Iterator
 
-import alphashape
+from alphashape import alphashape
 from matplotlib.path import Path
 from matplotlib.tri import Triangulation
-from shapely.geometry import Polygon, MultiPolygon, Point, LineString
+from numpy import ndarray, array
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry.base import BaseGeometry
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
 from triangle import triangulate
@@ -19,10 +21,15 @@ default_alpha: float = 8
 default_hole_alpha: float = 1.5
 default_max_area: float = 0.04
 
-Fs = list[float]
-P = tuple[float, float]
-Ps = list[P]
-EFs = list['ExtractedFrame']
+T: TypeVar = TypeVar('T')
+D1s: Type = list[float]
+D2: Type = tuple[float, float]
+D2s: Type = list[D2]
+D3: Type = tuple[float, float, float]
+D3s: Type = list[D3]
+
+Is: Type = list[tuple[int, int, int]]
+EFs: Type = list['ExtractedFrame']
 
 
 def proc_time_log(msg: str) -> Any:
@@ -38,6 +45,10 @@ def proc_time_log(msg: str) -> Any:
         return wrapper
 
     return deco
+
+
+def flat(iterable: Iterator[Iterator[T]]) -> Iterator[T]:
+    return (elem for sub_iterable in iterable for elem in sub_iterable)
 
 
 def return_new_group(
@@ -62,13 +73,13 @@ class ExtractedFrame:
         self.longitude: float = frame.longitude
         self.timestamp: int = frame.time1
 
-    def as_2d_pos(self) -> P:
+    def as_2d_pos(self) -> D2:
         return self.latitude, self.longitude
 
     def as_3d_pos(self) -> tuple[float, float, float]:
         return self.latitude, self.longitude, self.water_depth_m
 
-    def update_2d_pos(self, point: P):
+    def update_2d_pos(self, point: D2):
         self.latitude, self.longitude = point
 
     def __as_data_tuple(self) -> tuple[float, float, float, float]:
@@ -86,9 +97,9 @@ class ExtractedFrame:
 
 class FrameGroup:
     def __init__(self, frames: EFs | dict[str, EFs]) -> None:
-        self.__xs: Fs = []
-        self.__ys: Fs = []
-        self.__zs: Fs = []
+        self.__xs: D1s = []
+        self.__ys: D1s = []
+        self.__zs: D1s = []
         self.__paths: list[Path] = []
         self.__by_depths: EFs = []
 
@@ -104,24 +115,22 @@ class FrameGroup:
     @property
     def hole_paths(self) -> list[Path]:
         if not self.__paths:
-            self.__paths: list[Path] = list(
-                map(lambda h: FrameGroup.__construct_hole_paths(h.__as_pos()), self._holes)
-            )
+            self.__paths: list[Path] = list(map(lambda h: self.__construct_hole_paths(h.__as_2d_pos()), self._holes))
 
         return self.__paths.copy()
 
     @property
-    def xs(self) -> Fs:
+    def xs(self) -> D1s:
         self.__validate_vectors()
         return self.__xs.copy()
 
     @property
-    def ys(self) -> Fs:
+    def ys(self) -> D1s:
         self.__validate_vectors()
         return self.__ys.copy()
 
     @property
-    def zs(self) -> Fs:
+    def zs(self) -> D1s:
         self.__validate_vectors()
         return self.__zs.copy()
 
@@ -146,7 +155,7 @@ class FrameGroup:
             max_area: float = default_max_area,
             hole_alpha: float = default_hole_alpha
     ) -> 'FrameGroup':
-        all_points: Ps = self.__as_pos()
+        all_points: D2s = self.__as_2d_pos()
 
         if alpha < 0 or hole_alpha < 0:
             raise ValueError(
@@ -156,7 +165,7 @@ class FrameGroup:
         elif max_area < 0:
             raise ValueError('Delaunay triangles can only be constructed if the area is valid (greater than 0)')
 
-        hull_poly: Polygon | Any = alphashape.alphashape(all_points, float(alpha))
+        hull_poly: Polygon | Any = alphashape(all_points, float(alpha))
 
         if type(hull_poly) != Polygon:
             raise ValueError(
@@ -164,7 +173,7 @@ class FrameGroup:
                 f'or a single point or line pointing to data loss, the alpha value may be lowered to prevent this'
             )
 
-        hull_points: Ps = list(hull_poly.exterior.coords)
+        hull_points: D2s = list(hull_poly.exterior.coords)
         hull_frames: EFs = self.__order_and_map_points(hull_points)
         self._hull: FrameGroup | None = FrameGroup(hull_frames)
 
@@ -172,16 +181,14 @@ class FrameGroup:
         logger.debug(f'Hull consists of {len(hull_points)} points based on {len(all_points)} points')
 
         delaunay: dict = triangulate({'vertices': all_points}, opts=f'a{max_area}')
-        vertices: Ps = delaunay['vertices']
-        triangles: list[tuple[int, int, int]] = delaunay['triangles']
-        indices: list[tuple[int, int, int]] = list(filter(
+        vertices: D2s = delaunay['vertices']
+        triangles: Is = delaunay['triangles']
+        indices: Is = list(filter(
             lambda idxs: self.is_interior(Polygon(list(map(lambda i: vertices[i], idxs)))), filter(
                 lambda idxs: not all(map(lambda i: i < p_len, idxs)), triangles
             )
         ))
-        hole_points: Ps = list(
-            map(lambda i: all_points[i], filter(lambda i: i < p_len, (idx for sub in indices for idx in sub)))
-        )
+        hole_points: D2s = list(map(lambda i: all_points[i], filter(lambda i: i < p_len, flat(indices))))
 
         if hole_points:
             self.__construct_holes(hole_points, hole_alpha)
@@ -191,7 +198,7 @@ class FrameGroup:
 
     @proc_time_log('Calculating maximum plausible depth...')
     def get_max_plausible_depth(self, low: float, sensitivity: float) -> float:
-        depths: Fs = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self.__frames))))
+        depths: D1s = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self.__frames))))
         max_depth = next((cur for cur, fut in zip(depths, depths[1:]) if fut - cur >= sensitivity), depths[-1])
         logger.debug(f'Detected {max_depth} as max plausible depth for {sensitivity} as sensitivity')
         return max_depth
@@ -258,7 +265,7 @@ class FrameGroup:
 
     @proc_time_log('Filtering values...')
     @return_new_group
-    def inspect(self, min_point: P, max_point: P) -> 'FrameGroup':
+    def inspect(self, min_point: D2, max_point: D2) -> 'FrameGroup':
         min_x, min_y = min_point
         max_x, max_y = max_point
 
@@ -271,15 +278,15 @@ class FrameGroup:
     @return_new_group
     def flip(self, axis: str) -> 'FrameGroup':
         if axis not in 'xy':
-            raise ValueError('Direction has to be x, y or xy')
+            raise ValueError('Axis has to be x, y or xy')
 
         clones: EFs = self.frames.copy()
 
         if axis == 'xy':
-            any(map(lambda f: f.update_2d_pos(tuple(reversed(f.as_2d_pos()))), clones))
+            any(map(lambda f: f.update_2d_pos((reversed(f.as_2d_pos()))), clones))
             return clones
 
-        all_points: Ps = self.__as_pos()
+        all_points: D2s = self.__as_2d_pos()
         xs, ys = list(zip(*all_points))
         max_x: float = max(xs)
         max_y: float = max(ys)
@@ -287,27 +294,42 @@ class FrameGroup:
         [f.update_2d_pos((x, max_y - y) if axis == 'x' else (max_x - x, y)) for f, (x, y) in zip(clones, all_points)]
         return clones
 
-    @proc_time_log('Triangulating...')
-    def triangulate(self, shape: 'FrameGroup' = None) -> Triangulation:
+    @proc_time_log('Interpolating...')
+    def triangulate(self, shape: Optional['FrameGroup'] = None) -> Triangulation:
+        return self.__triangulate(self.__as_2d_pos(), shape if shape else self.shape())
+
+    @proc_time_log('Converting to 3D-printable...')
+    def as_exportable(self, shape: Optional['FrameGroup'] = None, fill_holes: bool = True) -> list[ndarray]:
         if not shape:
             shape: FrameGroup = self.shape()
 
-        all_points = self.__as_pos()
-        delaunay: dict = triangulate({'vertices': all_points}, opts='')
-        vertices: Ps = delaunay['vertices']
-        triangles: list[tuple[int, int, int]] = delaunay['triangles']
-        mask: list[bool] = list(
-            map(lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: tuple(vertices[i]), idxs)))), triangles)
-        )
+        hull_pts: D3s = list(map(lambda f: f.as_3d_pos(), shape.__frames))
+        hole_pts: list[D3s] = list(map(lambda h: list(map(lambda f: f.as_3d_pos(), h.__frames)), shape._holes))
+        cur_pts: D3s = hull_pts + list(flat(hole_pts))
+        other_pts: D3s = list(filter(lambda xyz: xyz not in cur_pts, map(lambda f: f.as_3d_pos(), self.__frames)))
 
-        return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
+        max_z: float = max(list(flat(map(self.__get_zs, hole_pts))) + self.__get_zs(hull_pts + other_pts))
+
+        hull_pts: D3s = self.__mod_zs(max_z, hull_pts)
+        hole_pts: list[D3s] = list(map(lambda h: self.__mod_zs(max_z, h), hole_pts))
+        other_pts: D3s = self.__mod_zs(max_z, other_pts)
+
+        if fill_holes:
+            top_hole_pts: list[D3s] = list(map(lambda h: self.__set_zs(h, max_z), hole_pts))
+            top_hole_vectors: list[ndarray] = list(flat(map(lambda h: self.__triangulate_vectors(h), top_hole_pts)))
+            hole_vectors: list[ndarray] = top_hole_vectors + list(flat(map(self.__build_walls, top_hole_pts)))
+        else:
+            hole_vectors: list[ndarray] = list(flat(map(self.__build_walls, hole_pts)))
+
+        body_vectors: list[ndarray] = self.__triangulate_vectors(hull_pts + other_pts + list(flat(hole_pts)), shape)
+        return self.__build_walls(hull_pts) + body_vectors + hole_vectors
 
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self.__frames))
 
-    def is_interior(self, other: Point | LineString | Polygon) -> bool:
-        holes: list[Polygon] = list(map(lambda h: Polygon(h.__as_pos()), self._holes))
-        shape: Polygon = Polygon(shell=self._hull.__as_pos())
+    def is_interior(self, other: BaseGeometry) -> bool:
+        holes: list[Polygon] = list(map(lambda h: Polygon(h.__as_2d_pos()), self._holes))
+        shape: Polygon = Polygon(self._hull.__as_2d_pos())
         return other.within(shape) and not any(map(lambda h: other.within(h), holes))
 
     @staticmethod
@@ -330,7 +352,7 @@ class FrameGroup:
         return internal_frames
 
     @staticmethod
-    def __construct_hole_paths(points: Ps) -> Path:
+    def __construct_hole_paths(points: D2s) -> Path:
         actions: list = [Path.MOVETO] + [Path.LINETO] * (len(points) - 2) + [Path.CLOSEPOLY]
         return Path(points, actions)
 
@@ -345,9 +367,57 @@ class FrameGroup:
         if type(param) == str and param != auto:
             raise ValueError(f'Parameters may only be numeric if not set to "{auto}"')
 
+    @staticmethod
+    def __get_zs(xyzs) -> D1s:
+        return [z for _, _, z in xyzs]
+
+    @staticmethod
+    def __mod_zs(max_z, xyzs) -> D3s:
+        return [(x, y, max_z - z) for x, y, z in xyzs]
+
+    @staticmethod
+    def __set_zs(xyzs, value: float = 0) -> D3s:
+        return [(x, y, value) for x, y, _ in xyzs]
+
+    @staticmethod
+    def __square_to_triangle(points: tuple[D3, D3, D3, D3]) -> list[ndarray]:
+        p1, p2, p3, p4 = points
+        return [array((p1, p2, p3)), array((p2, p3, p4))]
+
+    @staticmethod
+    def __build_walls(points: D3s) -> list[ndarray]:
+        bottom_points: D3s = FrameGroup.__set_zs(points)
+        wall_points: list[tuple[D3, D3, D3, D3]] = list(zip(
+            points, points[1:] + points[:1], bottom_points, bottom_points[1:] + bottom_points[:1]
+        ))
+        return list(flat(map(FrameGroup.__square_to_triangle, wall_points)))
+
+    @staticmethod
+    def __triangulate(points: D2s, shape: Optional['FrameGroup'] = None) -> Triangulation:
+        delaunay: dict = triangulate({'vertices': points}, opts='')
+        vertices: D2s = delaunay['vertices']
+        triangles: Is = delaunay['triangles']
+
+        if shape:
+            mask: list[bool] = list(map(
+                lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: (vertices[i]), idxs)))), triangles
+            ))
+        else:
+            poly: Polygon = Polygon(points)
+            mask: list[bool] = list(map(
+                lambda idxs: not Polygon(list(map(lambda i: (vertices[i]), idxs))).within(poly), triangles
+            ))
+
+        return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
+
+    @staticmethod
+    def __triangulate_vectors(points: D3s, shape: Optional['FrameGroup'] = None) -> list[ndarray]:
+        vectors: Is = FrameGroup.__triangulate([(x, y) for x, y, _ in points], shape).get_masked_triangles()
+        return list(map(lambda idxs: array(list(map(lambda i: points[i], idxs))), vectors))
+
     @proc_time_log('Constructing holes...')
-    def __construct_holes(self, hole_points: Ps, hole_alpha: float) -> None:
-        polys: MultiPolygon | Polygon | Any = alphashape.alphashape(hole_points, float(hole_alpha))
+    def __construct_holes(self, hole_points: D2s, hole_alpha: float) -> None:
+        polys: MultiPolygon | Polygon | Any = alphashape(hole_points, float(hole_alpha))
 
         if type(polys) != MultiPolygon and type(polys) != Polygon:
             raise ValueError(
@@ -371,11 +441,11 @@ class FrameGroup:
     def __order_frames(self):
         self.__by_depths: EFs = sorted(self.__frames, key=lambda f: f.water_depth_m)
 
-    def __order_and_map_points(self, ext_points: list[P]) -> EFs:
+    def __order_and_map_points(self, ext_points: list[D2]) -> EFs:
         unordered_frames: EFs = list(filter(lambda f: f.as_2d_pos() in ext_points, self.__frames))
         return list(map(lambda pos: next((f for f in unordered_frames if f.as_2d_pos() == pos)), ext_points))
 
-    def __as_pos(self) -> list[P]:
+    def __as_2d_pos(self) -> list[D2]:
         return list(map(lambda f: f.as_2d_pos(), self.__frames))
 
     def __validate_vectors(self) -> None:

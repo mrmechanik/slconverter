@@ -9,9 +9,10 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
 from matplotlib.tri import TriContourSet
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from models import ExtractedFrame, FrameGroup
-from slio import load_files
+from slio import load_files, save_stl
 
 logger = logging.getLogger(__name__)
 logging.getLogger('matplotlib').setLevel(logging.INFO)
@@ -58,14 +59,16 @@ def test() -> None:
     ax4.scatter(hx, hy, marker='x', c='orange')
     ax4.text(hx, hy, '{:.1f} m'.format(hz), c='orange')
 
-    cbar: Colorbar = plt.colorbar(tcs, ax=ax4, cmap=cmap)
+    cax: Axes = make_axes_locatable(ax4).append_axes('right', size='3%', pad=0.1)
+    cbar: Colorbar = plt.colorbar(tcs, cax=cax, cmap=cmap)
     cbar.ax.set_yticklabels(
         list(map(lambda n: round(n, 1), np.linspace(0, round(max(group.zs), 1), len(cbar.get_ticks()), endpoint=True)))
     )
 
     plt.show()
-
     logger.info('Plotting completed')
+
+    save_stl('data/res.stl', group.as_exportable(shape, False), True)
 
 
 if __name__ == '__main__':
