@@ -69,8 +69,8 @@ def return_new_group(
     def wrapper(self, *args, **kwargs) -> 'FrameGroup':
         res: EFs = func(self, *args, **kwargs)
         group: FrameGroup = FrameGroup(res)
-        group._hull: Optional[FrameGroup] = self._hull
-        group._holes: list[FrameGroup] = self._holes
+        group._hull = self._hull
+        group._holes = self._holes
         return group
 
     return wrapper
@@ -349,7 +349,7 @@ class FrameGroup:
 
         old_broken: int = len(broken_faces(mesh))
         mesh.fill_holes()
-        logger.debug('Repaired {} broken faces, mesh is{} watertight'.format(
+        logger.debug('Repaired {} broken faces, mesh is {}watertight'.format(
             old_broken - len(broken_faces(mesh)), '' if mesh.is_watertight else 'not '
         ))
         logger.debug(f'Final mesh consists of {len(mesh.vertices)} vertices')
