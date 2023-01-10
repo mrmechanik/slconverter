@@ -2,8 +2,7 @@ import logging
 from pathlib import Path
 
 import sllib
-from numpy import ndarray, zeros
-from stl.mesh import Mesh
+from trimesh import Trimesh
 
 from models import ExtractedFrame
 
@@ -54,18 +53,6 @@ def load_files(path: str | list[str]) -> dict[str, list[ExtractedFrame]]:
     return {Path(p).name: load_file(p) for p in path}
 
 
-def save_stl(path: str, vectors: list[ndarray], ignore_errors: bool = False) -> None:
-    data = zeros(len(vectors), dtype=Mesh.dtype)
-    data['vectors'] = vectors
-    mesh: Mesh = Mesh(data, remove_empty_areas=False)
-
-    if not mesh.check():
-        msg: str = 'The resulting mesh is invalid'
-
-        if ignore_errors:
-            logger.warning(msg)
-        else:
-            raise ValueError(msg)
-
-    mesh.save(path)
-    logger.info(f'Saved {len(vectors)} vectors to "{path}"')
+def save_stl(path: str, mesh: Trimesh) -> None:
+    mesh.export(path)
+    logger.info(f'Saved {len(mesh.vertices)} vectors to "{path}"')

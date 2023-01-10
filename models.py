@@ -1,4 +1,6 @@
 import logging
+import math
+import os
 import time
 from functools import wraps
 from typing import Any, Callable, Optional, Type, TypeVar, Iterator
@@ -6,12 +8,16 @@ from typing import Any, Callable, Optional, Type, TypeVar, Iterator
 from alphashape import alphashape
 from matplotlib.path import Path
 from matplotlib.tri import Triangulation
-from numpy import ndarray, array
+from numpy import ndarray, array, zeros
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.base import BaseGeometry
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
+from stl import Mesh
 from triangle import triangulate
+from trimesh import Trimesh, load
+from trimesh.repair import broken_faces
+from trimesh.smoothing import filter_laplacian
 
 logger: logging.Logger = logging.getLogger(__name__)
 auto: str = 'auto'
@@ -20,6 +26,9 @@ default_sensitivity: float = 0.07
 default_alpha: float = 8
 default_hole_alpha: float = 1.5
 default_max_area: float = 0.04
+default_power: float = 0.1
+default_iterations: int = 100
+default_buffer: float = 0.0005
 
 T: TypeVar = TypeVar('T')
 D1s: Type = list[float]
@@ -28,7 +37,9 @@ D2s: Type = list[D2]
 D3: Type = tuple[float, float, float]
 D3s: Type = list[D3]
 
-Is: Type = list[tuple[int, int, int]]
+I3s: Type = list[tuple[int, int, int]]
+D3T: Type = tuple[D3, D3, D3]
+Ns: Type = list[ndarray]
 EFs: Type = list['ExtractedFrame']
 
 
@@ -58,8 +69,8 @@ def return_new_group(
     def wrapper(self, *args, **kwargs) -> 'FrameGroup':
         res: EFs = func(self, *args, **kwargs)
         group: FrameGroup = FrameGroup(res)
-        group._hull = self._hull
-        group._holes = self._holes
+        group._hull: Optional[FrameGroup] = self._hull
+        group._holes: list[FrameGroup] = self._holes
         return group
 
     return wrapper
@@ -103,7 +114,7 @@ class FrameGroup:
         self.__paths: list[Path] = []
         self.__by_depths: EFs = []
 
-        self._hull: FrameGroup | None = None
+        self._hull: Optional[FrameGroup] = None
         self._holes: list[FrameGroup] = []
         self.__frames: EFs = self.__convert_frame_dict(frames) if type(frames) == dict else frames
         self.__hash: int = hash(tuple(frames))
@@ -116,6 +127,7 @@ class FrameGroup:
     def hole_paths(self) -> list[Path]:
         if not self.__paths:
             self.__paths: list[Path] = list(map(lambda h: self.__construct_hole_paths(h.__as_2d_pos()), self._holes))
+            logger.debug(f'Created {len(self.__paths)} paths representing the holes')
 
         return self.__paths.copy()
 
@@ -151,48 +163,28 @@ class FrameGroup:
     @proc_time_log('Constructing shape...')
     @return_new_group
     def shape(
-            self, alpha: float = default_alpha,
+            self,
+            alpha: float = default_alpha,
             max_area: float = default_max_area,
             hole_alpha: float = default_hole_alpha
     ) -> 'FrameGroup':
-        all_points: D2s = self.__as_2d_pos()
+        points: D2s = self.__as_2d_pos()
 
         if alpha < 0 or hole_alpha < 0:
             raise ValueError(
-                'The alpha value of an alpha shape may not be less than 0 as 0 already results in a convex hull '
-                'which would be the largest alpha shape available'
+                f'The alpha value of an alpha shape may not be less than 0 as 0 already results in a convex hull which '
+                f'would be the largest alpha shape available, provided was "{alpha}" and for holes "{hole_alpha}"'
             )
         elif max_area < 0:
-            raise ValueError('Delaunay triangles can only be constructed if the area is valid (greater than 0)')
-
-        hull_poly: Polygon | Any = alphashape(all_points, float(alpha))
-
-        if type(hull_poly) != Polygon:
             raise ValueError(
-                f'The provided alpha value {alpha} causes the resulting polygon to consist of multiple polygons '
-                f'or a single point or line pointing to data loss, the alpha value may be lowered to prevent this'
+                f'Delaunay triangles can only be constructed if the area is valid (greater than 0), not "{max_area}"'
             )
 
-        hull_points: D2s = list(hull_poly.exterior.coords)
+        hull_points, hole_points = self.__shape(points, alpha, max_area, hole_alpha)
         hull_frames: EFs = self.__order_and_map_points(hull_points)
         self._hull: FrameGroup | None = FrameGroup(hull_frames)
-
-        p_len: int = len(all_points)
-        logger.debug(f'Hull consists of {len(hull_points)} points based on {len(all_points)} points')
-
-        delaunay: dict = triangulate({'vertices': all_points}, opts=f'a{max_area}')
-        vertices: D2s = delaunay['vertices']
-        triangles: Is = delaunay['triangles']
-        indices: Is = list(filter(
-            lambda idxs: self.is_interior(Polygon(list(map(lambda i: vertices[i], idxs)))), filter(
-                lambda idxs: not all(map(lambda i: i < p_len, idxs)), triangles
-            )
-        ))
-        hole_points: D2s = list(map(lambda i: all_points[i], filter(lambda i: i < p_len, flat(indices))))
-
-        if hole_points:
-            self.__construct_holes(hole_points, hole_alpha)
-
+        self._holes: list[FrameGroup] = list(map(lambda p: FrameGroup(self.__order_and_map_points(p)), hole_points))
+        logger.debug(f'Hull consists of {len(hull_points)} points based on {len(points)} points')
         logger.debug(f'Detected {len(self._holes)} holes')
         return hull_frames
 
@@ -200,7 +192,7 @@ class FrameGroup:
     def get_max_plausible_depth(self, low: float, sensitivity: float) -> float:
         depths: D1s = sorted(set(filter(lambda m: m > low, map(lambda f: f.water_depth_m, self.__frames))))
         max_depth = next((cur for cur, fut in zip(depths, depths[1:]) if fut - cur >= sensitivity), depths[-1])
-        logger.debug(f'Detected {max_depth} as max plausible depth for {sensitivity} as sensitivity')
+        logger.debug(f'Detected max plausible depth "{max_depth}" for sensitivity "{sensitivity}"')
         return max_depth
 
     def filter_min(self, min_border: float | str = auto) -> 'FrameGroup':
@@ -212,7 +204,8 @@ class FrameGroup:
     @proc_time_log('Filtering frames...')
     @return_new_group
     def filter(
-            self, min_border: float | str = auto,
+            self,
+            min_border: float | str = auto,
             max_border: float | str = auto,
             sensitivity_for_max: float = default_sensitivity
     ) -> 'FrameGroup':
@@ -223,15 +216,19 @@ class FrameGroup:
         high: float = self.get_max_plausible_depth(low, sensitivity_for_max) if max_border == auto else max_border
 
         if low >= high:
-            raise ValueError(f'No outliers detectable for LOW {low} and HIGH {high}')
+            raise ValueError(f'No outliers detectable for LOW "{low}" and HIGH "{high}"')
 
-        logger.debug(f'Using {low} and {high} as border values')
-        return list(filter(lambda f: low < f.water_depth_m <= high, self.__frames))
+        filtered_frames: EFs = list(filter(lambda f: low < f.water_depth_m <= high, self.__frames))
+        logger.debug(
+            f'Using "{low}" and "{high}" as border values caused {len(self.__frames) - len(filtered_frames)} to be '
+            f'removed'
+        )
+        return filtered_frames
 
     @proc_time_log('Removing duplicates...')
     @return_new_group
     def uniquify(self) -> 'FrameGroup':
-        ordered_uniques: EFs = sorted(list(set(self.__frames)), key=lambda f: f.timestamp)
+        ordered_uniques: EFs = sorted(set(self.__frames), key=lambda f: f.timestamp)
         logger.debug(f'Reduced {len(self.__frames)} frames to {len(ordered_uniques)} frames')
         return ordered_uniques
 
@@ -260,7 +257,7 @@ class FrameGroup:
             while scale * factor < 1:
                 scale *= 10
 
-        logger.debug(f'Using {min_x} and {min_y} as minimal values and {scale} as scale factor')
+        logger.debug(f'Using x "{min_x}" and y "{min_y}" as minimal values and "{scale}" as scale factor')
         return list(map(lambda f: self.__normalize_row(min_x, min_y, scale, f), self.__frames))
 
     @proc_time_log('Filtering values...')
@@ -270,15 +267,21 @@ class FrameGroup:
         max_x, max_y = max_point
 
         if min_x >= max_x or min_y >= max_y:
-            raise ValueError('Min cannot be smaller than max')
+            raise ValueError(
+                f'Min cannot be smaller than max, provided xs "{min_x}" - "{max_x}" and ys "{min_y}" - "{max_y}"'
+            )
 
-        return list(filter(lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self.__frames))
+        inspected_frames: EFs = list(filter(
+            lambda f: min_x <= f.latitude < max_x and min_y <= f.longitude < max_y, self.__frames
+        ))
+        logger.debug(f'Inspection reduced frame count from {len(self.__frames)} to {len(inspected_frames)}')
+        return inspected_frames
 
     @proc_time_log('Flipping points...')
     @return_new_group
     def flip(self, axis: str) -> 'FrameGroup':
         if axis not in 'xy':
-            raise ValueError('Axis has to be x, y or xy')
+            raise ValueError(f'Axis has to be x, y or xy, not "{axis}"')
 
         clones: EFs = self.frames.copy()
 
@@ -292,37 +295,65 @@ class FrameGroup:
         max_y: float = max(ys)
 
         [f.update_2d_pos((x, max_y - y) if axis == 'x' else (max_x - x, y)) for f, (x, y) in zip(clones, all_points)]
+        logger.debug(f'Flipped {len(clones)} frames on the "{axis}" axis')
         return clones
 
-    @proc_time_log('Interpolating...')
+    @proc_time_log('Triangulating...')
     def triangulate(self, shape: Optional['FrameGroup'] = None) -> Triangulation:
-        return self.__triangulate(self.__as_2d_pos(), shape if shape else self.shape())
+        triang: Triangulation = self.__triangulate(self.__as_2d_pos(), shape if shape else self.shape())
+        logger.debug(f'Triangulation resulted in {len(triang.triangles)} triangles')
+        return triang
 
     @proc_time_log('Converting to 3D-printable...')
-    def as_exportable(self, shape: Optional['FrameGroup'] = None, fill_holes: bool = True) -> list[ndarray]:
+    def as_exportable(
+            self,
+            shape: Optional['FrameGroup'] = None,
+            z_buffer: float = default_buffer,
+            smooth_power: float = default_power,
+            smooth_iterations: int = default_iterations,
+            keep_tmp: bool = False
+    ) -> Trimesh:
+        self.__validate_param(smooth_power)
+        self.__validate_param(smooth_iterations)
+
+        if not 0 <= smooth_power <= 1:
+            raise ValueError(f'The smoothing power has to be between 0 and 1 inclusive, not "{smooth_power}"')
+
+        if smooth_iterations < 0:
+            raise ValueError(f'The iterations have to be positive, not "{smooth_iterations}"')
+
         if not shape:
             shape: FrameGroup = self.shape()
 
-        hull_pts: D3s = list(map(lambda f: f.as_3d_pos(), shape.__frames))
-        hole_pts: list[D3s] = list(map(lambda h: list(map(lambda f: f.as_3d_pos(), h.__frames)), shape._holes))
-        cur_pts: D3s = hull_pts + list(flat(hole_pts))
-        other_pts: D3s = list(filter(lambda xyz: xyz not in cur_pts, map(lambda f: f.as_3d_pos(), self.__frames)))
+        points: D3s = self.__as_3d_pos()
+        max_z: float = max(self.__get_zs(points))
+        lid_vectors: Ns = self.__triangulate_vectors(self.__mod_zs(points, max_z), shape)
 
-        max_z: float = max(list(flat(map(self.__get_zs, hole_pts))) + self.__get_zs(hull_pts + other_pts))
+        temps = [f'data/temp{num}.stl' for num in range(1, 3)]
+        temp1, temp2 = temps
+        self.__mesh_from_vectors(lid_vectors).save(temp1)
 
-        hull_pts: D3s = self.__mod_zs(max_z, hull_pts)
-        hole_pts: list[D3s] = list(map(lambda h: self.__mod_zs(max_z, h), hole_pts))
-        other_pts: D3s = self.__mod_zs(max_z, other_pts)
+        lid_mesh: Trimesh = load(temp1)
+        filter_laplacian(lid_mesh, lamb=smooth_power, iterations=smooth_iterations)
+        logger.debug(f'Smoothing reduced vector count from {len(lid_vectors)} to {len(lid_mesh.vertices)}')
 
-        if fill_holes:
-            top_hole_pts: list[D3s] = list(map(lambda h: self.__set_zs(h, max_z), hole_pts))
-            top_hole_vectors: list[ndarray] = list(flat(map(lambda h: self.__triangulate_vectors(h), top_hole_pts)))
-            hole_vectors: list[ndarray] = top_hole_vectors + list(flat(map(self.__build_walls, top_hole_pts)))
-        else:
-            hole_vectors: list[ndarray] = list(flat(map(self.__build_walls, hole_pts)))
+        min_z: float = min((z for _, _, z in lid_mesh.vertices)) - z_buffer
 
-        body_vectors: list[ndarray] = self.__triangulate_vectors(hull_pts + other_pts + list(flat(hole_pts)), shape)
-        return self.__build_walls(hull_pts) + body_vectors + hole_vectors
+        vectors: Ns = list(flat(map(lambda tri: self.__build_prism_from_tri(tri, - min_z), lid_mesh.triangles)))
+        self.__mesh_from_vectors(vectors).save(temp2)
+
+        mesh: Trimesh = load(temp2)
+
+        if not keep_tmp:
+            any(map(lambda t: os.remove(t), temps))
+
+        old_broken: int = len(broken_faces(mesh))
+        mesh.fill_holes()
+        logger.debug('Repaired {} broken faces, mesh is{} watertight'.format(
+            old_broken - len(broken_faces(mesh)), '' if mesh.is_watertight else 'not '
+        ))
+        logger.debug(f'Final mesh consists of {len(mesh.vertices)} vertices')
+        return mesh
 
     def get_max_keel_m(self) -> float:
         return max(map(lambda f: f.keel_depth_m, self.__frames))
@@ -335,26 +366,14 @@ class FrameGroup:
     @staticmethod
     @proc_time_log('Reducing to list & updating timestamps...')
     def __convert_frame_dict(frames: dict[str, EFs]) -> EFs:
-        internal_frames: EFs = []
-        any(map(internal_frames.extend, frames.values()))
-
-        stamps: list[int] = list(map(lambda f: f.timestamp, internal_frames))
-        stamp_offset: int = max(stamps) - min(stamps)
-        internal_frames: EFs = []
-
-        for idx, frame_list in enumerate(frames.values()):
-            list_offset: int = idx * stamp_offset
-
-            for frame in frame_list:
-                frame.timestamp += list_offset
-                internal_frames.append(frame)
-
-        return internal_frames
+        frames_stack: list[EFs] = list(frames.values())
+        stamps: list[int] = list(map(lambda f: f.timestamp, flat(frames_stack)))
+        offset: int = max(stamps) - min(stamps)
+        return [FrameGroup.__update_and_return(f, idx * offset) for idx, fs in enumerate(frames_stack) for f in fs]
 
     @staticmethod
     def __construct_hole_paths(points: D2s) -> Path:
-        actions: list = [Path.MOVETO] + [Path.LINETO] * (len(points) - 2) + [Path.CLOSEPOLY]
-        return Path(points, actions)
+        return Path(points, [Path.MOVETO] + [Path.LINETO] * (len(points) - 2) + [Path.CLOSEPOLY])
 
     @staticmethod
     def __normalize_row(min_x: float, min_y: float, scale: float, frame: ExtractedFrame) -> ExtractedFrame:
@@ -363,40 +382,80 @@ class FrameGroup:
         return frame
 
     @staticmethod
+    def __update_and_return(frame: ExtractedFrame, offset: int):
+        frame.timestamp += offset
+        return frame
+
+    @staticmethod
+    def __shape(
+            points: D2s,
+            alpha: float = default_alpha,
+            max_area: float = default_max_area,
+            hole_alpha: float = default_hole_alpha
+    ) -> tuple[D2s, list[D2s]]:
+        hull_poly: Polygon | Any = alphashape(points, float(alpha))
+
+        if type(hull_poly) != Polygon:
+            raise ValueError(
+                f'The provided alpha value "{alpha}" causes the resulting polygon to consist of multiple polygons '
+                f'or a single point or line pointing to data loss, the alpha value may be lowered to prevent this'
+            )
+
+        hull_points: D2s = list(hull_poly.exterior.coords)
+        p_len: int = len(points)
+
+        delaunay: dict = triangulate({'vertices': points}, opts=f'a{max_area}')
+        vertices: D2s = delaunay['vertices']
+        triangles: I3s = delaunay['triangles']
+        indices: I3s = list(filter(
+            lambda idxs: hull_poly.contains(Polygon(list(map(lambda i: vertices[i], idxs)))), filter(
+                lambda idxs: not all(map(lambda i: i < p_len, idxs)), triangles
+            )
+        ))
+        stacked_hole_points: D2s = list(map(lambda i: points[i], filter(lambda i: i < p_len, flat(indices))))
+        return hull_points, FrameGroup.__get_holes(stacked_hole_points, hole_alpha) if stacked_hole_points else []
+
+    @staticmethod
     def __validate_param(param: float | str) -> None:
         if type(param) == str and param != auto:
-            raise ValueError(f'Parameters may only be numeric if not set to "{auto}"')
+            raise ValueError(f'Parameters may only be numeric if not set to "{auto}", provided "{param}"')
 
     @staticmethod
     def __get_zs(xyzs) -> D1s:
         return [z for _, _, z in xyzs]
 
     @staticmethod
-    def __mod_zs(max_z, xyzs) -> D3s:
-        return [(x, y, max_z - z) for x, y, z in xyzs]
+    def __mod_zs(xyzs, mod) -> D3s:
+        return [(x, y, mod - z) for x, y, z in xyzs]
 
     @staticmethod
-    def __set_zs(xyzs, value: float = 0) -> D3s:
-        return [(x, y, value) for x, y, _ in xyzs]
+    def __build_prism_from_tri(tri: ndarray, z_mod: float = 0) -> Ns:
+        p1, p2, p3 = [(x, y, z + z_mod) for x, y, z in tri]
+        floor_tri = [(x, y, 0) for x, y, _ in tri]
+        p1f, p2f, p3f = floor_tri
+        v12: Ns = FrameGroup.__square_to_triangle((p1, p2, p1f, p2f))
+        v13: Ns = FrameGroup.__square_to_triangle((p1, p3, p1f, p3f))
+        v23: Ns = FrameGroup.__square_to_triangle((p2, p3, p2f, p3f))
+        return [array((p1, p2, p3))] + [array(floor_tri)] + v12 + v13 + v23
 
     @staticmethod
-    def __square_to_triangle(points: tuple[D3, D3, D3, D3]) -> list[ndarray]:
+    def __mesh_from_vectors(vectors: Ns) -> Mesh:
+        data = zeros(len(vectors), dtype=Mesh.dtype)
+        data['vectors']: list[ndarray] = vectors
+        return Mesh(data, remove_empty_areas=True)
+
+    @staticmethod
+    def __square_to_triangle(points: tuple[D3, D3, D3, D3]) -> Ns:
         p1, p2, p3, p4 = points
-        return [array((p1, p2, p3)), array((p2, p3, p4))]
-
-    @staticmethod
-    def __build_walls(points: D3s) -> list[ndarray]:
-        bottom_points: D3s = FrameGroup.__set_zs(points)
-        wall_points: list[tuple[D3, D3, D3, D3]] = list(zip(
-            points, points[1:] + points[:1], bottom_points, bottom_points[1:] + bottom_points[:1]
-        ))
-        return list(flat(map(FrameGroup.__square_to_triangle, wall_points)))
+        z1, z2, z3, z4 = FrameGroup.__get_zs(points)
+        is_smaller: bool = math.fabs(z1 - z4) < math.fabs(z2 - z3)
+        return [array((p1, p2, p3)), array((p2, p3, p4))] if is_smaller else [array((p1, p3, p4)), array((p1, p2, p4))]
 
     @staticmethod
     def __triangulate(points: D2s, shape: Optional['FrameGroup'] = None) -> Triangulation:
         delaunay: dict = triangulate({'vertices': points}, opts='')
         vertices: D2s = delaunay['vertices']
-        triangles: Is = delaunay['triangles']
+        triangles: I3s = delaunay['triangles']
 
         if shape:
             mask: list[bool] = list(map(
@@ -411,18 +470,18 @@ class FrameGroup:
         return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
 
     @staticmethod
-    def __triangulate_vectors(points: D3s, shape: Optional['FrameGroup'] = None) -> list[ndarray]:
-        vectors: Is = FrameGroup.__triangulate([(x, y) for x, y, _ in points], shape).get_masked_triangles()
+    def __triangulate_vectors(points: D3s, shape: Optional['FrameGroup'] = None) -> Ns:
+        vectors: I3s = FrameGroup.__triangulate([(x, y) for x, y, _ in points], shape).get_masked_triangles()
         return list(map(lambda idxs: array(list(map(lambda i: points[i], idxs))), vectors))
 
-    @proc_time_log('Constructing holes...')
-    def __construct_holes(self, hole_points: D2s, hole_alpha: float) -> None:
+    @staticmethod
+    def __get_holes(hole_points: D2s, hole_alpha: float) -> list[D2s]:
         polys: MultiPolygon | Polygon | Any = alphashape(hole_points, float(hole_alpha))
 
         if type(polys) != MultiPolygon and type(polys) != Polygon:
             raise ValueError(
-                f'The hole alpha {hole_alpha} value causes the holes to be too imprecise, the alpha value may be '
-                f'lowered to prevent this'
+                f'The hole alpha "{hole_alpha}" value causes the holes to be too imprecise, the alpha value may be '
+                'lowered to prevent this'
             )
 
         if type(polys) == Polygon:
@@ -430,9 +489,7 @@ class FrameGroup:
         elif type(polys) == MultiPolygon:
             polys = polys.geoms
 
-        self._holes: list[FrameGroup] = list(
-            map(lambda p: FrameGroup(self.__order_and_map_points(list(reversed(p.exterior.coords)))), polys)
-        )
+        return list(map(lambda p: list(reversed(p.exterior.coords)), polys))
 
     def __rebuild_vectors(self) -> None:
         self.__clear()
@@ -441,12 +498,15 @@ class FrameGroup:
     def __order_frames(self):
         self.__by_depths: EFs = sorted(self.__frames, key=lambda f: f.water_depth_m)
 
-    def __order_and_map_points(self, ext_points: list[D2]) -> EFs:
+    def __order_and_map_points(self, ext_points: D2s) -> EFs:
         unordered_frames: EFs = list(filter(lambda f: f.as_2d_pos() in ext_points, self.__frames))
         return list(map(lambda pos: next((f for f in unordered_frames if f.as_2d_pos() == pos)), ext_points))
 
-    def __as_2d_pos(self) -> list[D2]:
+    def __as_2d_pos(self) -> D2s:
         return list(map(lambda f: f.as_2d_pos(), self.__frames))
+
+    def __as_3d_pos(self) -> D3s:
+        return list(map(lambda f: f.as_3d_pos(), self.__frames))
 
     def __validate_vectors(self) -> None:
         cur_hash: int = hash(tuple(self.__frames))

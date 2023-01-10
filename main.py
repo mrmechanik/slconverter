@@ -45,7 +45,7 @@ def test() -> None:
     logger.info('Generating Plot 4')
 
     cmap: LinearSegmentedColormap = LinearSegmentedColormap.from_list(
-        name='Water Depth', colors=['w', 'CornflowerBlue', 'DarkBlue']
+        name='Water Depth', colors=('w', 'CornflowerBlue', 'DarkBlue')
     )
 
     lx, ly, lz = group.shallowest.as_3d_pos()
@@ -68,7 +68,7 @@ def test() -> None:
     plt.show()
     logger.info('Plotting completed')
 
-    save_stl('data/res.stl', group.as_exportable(shape, False), True)
+    save_stl('data/res.stl', group.as_exportable(shape, keep_tmp=True))
 
 
 if __name__ == '__main__':
