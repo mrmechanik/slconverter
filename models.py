@@ -29,6 +29,7 @@ default_max_area: float = 0.04
 default_power: float = 0.1
 default_iterations: int = 100
 default_buffer: float = 0.0005
+default_scale: float = 1
 
 T: TypeVar = TypeVar('T')
 D1s: Type = list[float]
@@ -308,6 +309,7 @@ class FrameGroup:
     def as_exportable(
             self,
             shape: Optional['FrameGroup'] = None,
+            scale: float | D3 = default_scale,
             z_buffer: float = default_buffer,
             smooth_power: float = default_power,
             smooth_iterations: int = default_iterations,
@@ -338,10 +340,16 @@ class FrameGroup:
         logger.debug(f'Smoothing reduced vector count from {len(lid_vectors)} to {len(lid_mesh.vertices)}')
 
         min_z: float = min((z for _, _, z in lid_mesh.vertices)) - z_buffer
-
         vectors: Ns = list(flat(map(lambda tri: self.__build_prism_from_tri(tri, - min_z), lid_mesh.triangles)))
-        self.__mesh_from_vectors(vectors).save(temp2)
 
+        if type(scale) == float:
+            scale = (scale, scale, scale)
+
+        if scale != (1, 1, 1):
+            logger.debug(f'Scaling {len(vectors)} vectors by {scale}')
+            vectors: Ns = list(map(lambda t: array(list(map(lambda v: v * scale, t))), vectors))
+
+        self.__mesh_from_vectors(vectors).save(temp2)
         mesh: Trimesh = load(temp2)
 
         if not keep_tmp:

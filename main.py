@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 
-def test() -> None:
+def main() -> None:
     frames: dict[str, list[ExtractedFrame]] = load_files('data/')
 
     group: FrameGroup = FrameGroup(frames).filter().uniquify().normalize().flip('xy')
@@ -96,4 +96,4 @@ if __name__ == '__main__':
             }
         }
     })
-    test()
+    main()
