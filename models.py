@@ -313,6 +313,7 @@ class FrameGroup:
             z_buffer: float = default_buffer,
             smooth_power: float = default_power,
             smooth_iterations: int = default_iterations,
+            fill_holes: bool = False,
             keep_tmp: bool = False
     ) -> Trimesh:
         self.__validate_param(smooth_power)
@@ -329,9 +330,17 @@ class FrameGroup:
 
         points: D3s = self.__as_3d_pos()
         max_z: float = max(self.__get_zs(points))
+        hole_vectors: Ns = []
+
+        if fill_holes:
+            hole_vectors: Ns = list(flat(map(
+                lambda h: self.__triangulate_vectors(self.__set_zs(h.__as_3d_pos(), max_z)), self._holes
+            )))
+            shape._holes = []
+
         lid_vectors: Ns = self.__triangulate_vectors(self.__mod_zs(points, max_z), shape)
 
-        temps = [f'data/temp{num}.stl' for num in range(1, 3)]
+        temps: list[str] = [f'data/temp{num}.stl' for num in range(1, 3)]
         temp1, temp2 = temps
         self.__mesh_from_vectors(lid_vectors).save(temp1)
 
@@ -340,9 +349,11 @@ class FrameGroup:
         logger.debug(f'Smoothing reduced vector count from {len(lid_vectors)} to {len(lid_mesh.vertices)}')
 
         min_z: float = min((z for _, _, z in lid_mesh.vertices)) - z_buffer
-        vectors: Ns = list(flat(map(lambda tri: self.__build_prism_from_tri(tri, - min_z), lid_mesh.triangles)))
+        vectors: Ns = list(flat(map(
+            lambda tri: self.__build_prism_from_tri(tri, - min_z), list(lid_mesh.triangles) + list(hole_vectors)
+        )))
 
-        if type(scale) == float:
+        if type(scale) == float or type(scale) == int:
             scale = (scale, scale, scale)
 
         if scale != (1, 1, 1):
@@ -437,6 +448,10 @@ class FrameGroup:
         return [(x, y, mod - z) for x, y, z in xyzs]
 
     @staticmethod
+    def __set_zs(xyzs, new_z) -> D3s:
+        return [(x, y, new_z) for x, y, z in xyzs]
+
+    @staticmethod
     def __build_prism_from_tri(tri: ndarray, z_mod: float = 0) -> Ns:
         p1, p2, p3 = [(x, y, z + z_mod) for x, y, z in tri]
         floor_tri = [(x, y, 0) for x, y, _ in tri]
@@ -448,7 +463,7 @@ class FrameGroup:
 
     @staticmethod
     def __mesh_from_vectors(vectors: Ns) -> Mesh:
-        data = zeros(len(vectors), dtype=Mesh.dtype)
+        data: ndarray = zeros(len(vectors), dtype=Mesh.dtype)
         data['vectors']: list[ndarray] = vectors
         return Mesh(data, remove_empty_areas=True)
 
@@ -464,15 +479,11 @@ class FrameGroup:
         delaunay: dict = triangulate({'vertices': points}, opts='')
         vertices: D2s = delaunay['vertices']
         triangles: I3s = delaunay['triangles']
+        mask: Optional[list[bool]] = None
 
         if shape:
             mask: list[bool] = list(map(
                 lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: (vertices[i]), idxs)))), triangles
-            ))
-        else:
-            poly: Polygon = Polygon(points)
-            mask: list[bool] = list(map(
-                lambda idxs: not Polygon(list(map(lambda i: (vertices[i]), idxs))).within(poly), triangles
             ))
 
         return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
