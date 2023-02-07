@@ -91,7 +91,7 @@ class ExtractedFrame:
     def as_3d_pos(self) -> tuple[float, float, float]:
         return self.latitude, self.longitude, self.water_depth_m
 
-    def update_2d_pos(self, point: D2):
+    def update_2d_pos(self, point: D2) -> None:
         self.latitude, self.longitude = point
 
     def __as_data_tuple(self) -> tuple[float, float, float, float]:
