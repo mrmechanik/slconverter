@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import time
+from collections import Counter
 from functools import wraps
 from typing import Any, Callable, Optional, Type, TypeVar, Iterator
 
@@ -349,12 +350,19 @@ class FrameGroup:
         logger.debug(f'Smoothing reduced vector count from {len(lid_vectors)} to {len(lid_mesh.vertices)}')
 
         min_z: float = min((z for _, _, z in lid_mesh.vertices)) - z_buffer
-        vectors: Ns = list(flat(map(
-            lambda tri: self.__build_prism_from_tri(tri, - min_z), list(lid_mesh.triangles) + list(hole_vectors)
-        )))
+        ceil_mesh: Ns = list(map(lambda tri: self.__update_tri(tri, - min_z), lid_mesh.triangles)) + list(hole_vectors)
+        floor_mesh: Ns = list(map(self.__build_floor_tri, ceil_mesh))
+
+        wall_lines: list[tuple[D3, D3]] = list(flat(map(lambda tri: self.__tri_to_lines(tri), ceil_mesh)))
+        line_occurs: dict = Counter(wall_lines)
+        wall_lines: list[tuple[D3, D3]] = [k for k, v in line_occurs.items() if v == 1]
+        wall_vectors: list = list(flat(map(self.__build_wall, wall_lines)))
+        logger.debug(f'Constructed {len(wall_vectors)} wall vectors')
+
+        vectors: Ns = ceil_mesh + list(flat(map(self.__build_wall, wall_lines))) + floor_mesh
 
         if type(scale) == float or type(scale) == int:
-            scale = (scale, scale, scale)
+            scale: D3 = (scale, scale, scale)
 
         if scale != (1, 1, 1):
             logger.debug(f'Scaling {len(vectors)} vectors by {scale}')
@@ -389,6 +397,21 @@ class FrameGroup:
         stamps: list[int] = list(map(lambda f: f.timestamp, flat(frames_stack)))
         offset: int = max(stamps) - min(stamps)
         return [FrameGroup.__update_and_return(f, idx * offset) for idx, fs in enumerate(frames_stack) for f in fs]
+
+    @staticmethod
+    def __tri_to_lines(tri: Ns) -> list[tuple[D3, D3]]:
+        p1, p2, p3 = list(map(tuple, tri))
+
+        if p1 > p2:
+            p1, p2 = p2, p1
+
+        if p2 > p3:
+            p2, p3 = p3, p2
+
+        if p1 > p2:
+            p1, p2 = p2, p1
+
+        return [(p1, p2), (p1, p3), (p2, p3)]
 
     @staticmethod
     def __construct_hole_paths(points: D2s) -> Path:
@@ -452,14 +475,17 @@ class FrameGroup:
         return [(x, y, new_z) for x, y, z in xyzs]
 
     @staticmethod
-    def __build_prism_from_tri(tri: ndarray, z_mod: float = 0) -> Ns:
-        p1, p2, p3 = [(x, y, z + z_mod) for x, y, z in tri]
-        floor_tri = [(x, y, 0) for x, y, _ in tri]
-        p1f, p2f, p3f = floor_tri
-        v12: Ns = FrameGroup.__square_to_triangle((p1, p2, p1f, p2f))
-        v13: Ns = FrameGroup.__square_to_triangle((p1, p3, p1f, p3f))
-        v23: Ns = FrameGroup.__square_to_triangle((p2, p3, p2f, p3f))
-        return [array((p1, p2, p3))] + [array(floor_tri)] + v12 + v13 + v23
+    def __build_floor_tri(tri: ndarray) -> ndarray:
+        return array([(x, y, 0) for x, y, _ in tri])
+
+    @staticmethod
+    def __update_tri(tri: ndarray, z_mod: float):
+        return array([(x, y, z + z_mod) for x, y, z in tri])
+
+    @staticmethod
+    def __build_wall(ps: D3s) -> Ns:
+        pfs: D3s = [(x, y, 0) for x, y, _ in ps]
+        return FrameGroup.__square_to_triangle((*ps, *pfs))
 
     @staticmethod
     def __mesh_from_vectors(vectors: Ns) -> Mesh:
