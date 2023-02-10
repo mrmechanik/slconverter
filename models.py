@@ -253,7 +253,7 @@ class FrameGroup:
             diff_x: float = max(map(lambda f: f.latitude, self.__frames)) - min_x
             diff_y: float = max(map(lambda f: f.longitude, self.__frames)) - min_y
 
-            factor: float = diff_x if diff_x > diff_y else diff_y
+            factor: float = max(diff_x, diff_y)
             scale: int = 1
 
             while scale * factor < 1:
@@ -400,17 +400,7 @@ class FrameGroup:
 
     @staticmethod
     def __tri_to_lines(tri: Ns) -> list[tuple[D3, D3]]:
-        p1, p2, p3 = list(map(tuple, tri))
-
-        if p1 > p2:
-            p1, p2 = p2, p1
-
-        if p2 > p3:
-            p2, p3 = p3, p2
-
-        if p1 > p2:
-            p1, p2 = p2, p1
-
+        p1, p2, p3 = sorted(map(tuple, tri))
         return [(p1, p2), (p1, p3), (p2, p3)]
 
     @staticmethod
