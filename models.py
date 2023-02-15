@@ -9,15 +9,14 @@ from typing import Any, Callable, Optional, Type, TypeVar, Iterator
 from alphashape import alphashape
 from matplotlib.path import Path
 from matplotlib.tri import Triangulation
-from numpy import ndarray, array, zeros
-from shapely.geometry import Polygon, MultiPolygon
+from numpy import ndarray, array, zeros, cross
+from shapely.geometry import Polygon, MultiPolygon, LineString, Point, MultiLineString, LinearRing
 from shapely.geometry.base import BaseGeometry
 from sllib import Frame
 from sllib.definitions import FEET_CONVERSION
 from stl import Mesh
 from triangle import triangulate
 from trimesh import Trimesh, load
-from trimesh.repair import broken_faces
 from trimesh.smoothing import filter_laplacian
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -288,7 +287,7 @@ class FrameGroup:
         clones: EFs = self.frames.copy()
 
         if axis == 'xy':
-            any(map(lambda f: f.update_2d_pos((reversed(f.as_2d_pos()))), clones))
+            any(map(lambda f: f.update_2d_pos(reversed(f.as_2d_pos())), clones))
             return clones
 
         all_points: D2s = self.__as_2d_pos()
@@ -331,15 +330,10 @@ class FrameGroup:
 
         points: D3s = self.__as_3d_pos()
         max_z: float = max(self.__get_zs(points))
-        hole_vectors: Ns = []
 
-        if fill_holes:
-            hole_vectors: Ns = list(flat(map(
-                lambda h: self.__triangulate_vectors(self.__set_zs(h.__as_3d_pos(), max_z)), self._holes
-            )))
-            shape._holes = []
-
+        shape._holes = []
         lid_vectors: Ns = self.__triangulate_vectors(self.__mod_zs(points, max_z), shape)
+        shape._holes = self._holes
 
         temps: list[str] = [f'data/temp{num}.stl' for num in range(1, 3)]
         temp1, temp2 = temps
@@ -350,36 +344,64 @@ class FrameGroup:
         logger.debug(f'Smoothing reduced vector count from {len(lid_vectors)} to {len(lid_mesh.vertices)}')
 
         min_z: float = min((z for _, _, z in lid_mesh.vertices)) - z_buffer
-        ceil_mesh: Ns = list(map(lambda tri: self.__update_tri(tri, - min_z), lid_mesh.triangles)) + list(hole_vectors)
-        floor_mesh: Ns = list(map(self.__build_floor_tri, ceil_mesh))
+        dirty_ceil_tris: Ns = list(map(lambda tri: array(self.__mod_zs(tri, - min_z, True)), lid_mesh.triangles))
+        dirty_ceil_poly: Polygon = self.__unite(list(map(lambda tri: tri[:, :2], dirty_ceil_tris)))
+        part_ceil_tris: Ns = list(filter(
+            lambda tri: dirty_ceil_poly.covers(Polygon(tri[:, :2])),
+            self.__triangulate_vectors(list(flat(map(lambda tri: tuple(map(tuple, tri)), dirty_ceil_tris))))
+        ))
+        ceil_tris: Ns = list(filter(
+            lambda tri: not any(map(lambda h: Polygon(tri[:, :2]).within(Polygon(h.__as_2d_pos())), shape._holes)),
+            part_ceil_tris
+        ))
 
-        wall_lines: list[tuple[D3, D3]] = list(flat(map(lambda tri: self.__tri_to_lines(tri), ceil_mesh)))
-        line_occurs: dict = Counter(wall_lines)
-        wall_lines: list[tuple[D3, D3]] = [k for k, v in line_occurs.items() if v == 1]
-        wall_vectors: list = list(flat(map(self.__build_wall, wall_lines)))
-        logger.debug(f'Constructed {len(wall_vectors)} wall vectors')
+        inter_tris: list[Ns] = list(map(lambda h: list(filter(
+            lambda tri: Polygon(tri[:, :2]).intersects(Polygon(h.__as_2d_pos())), ceil_tris
+        )), shape._holes))
+        hole_points: list[list[D3s]] = [
+            list(map(lambda tri: self.__calc_hole_points(tri, hole.__as_2d_pos()), tris)) for tris, hole in
+            zip(inter_tris, shape._holes)
+        ]
+        fixed_hole_tris: list[Ns] = [list(flat((
+            self.__fix_tri(tri, fixed, Polygon(hole.__as_2d_pos())) for tri, fixed in zip(tris, fixes))
+        )) for tris, fixes, hole in zip(inter_tris, hole_points, shape._holes)]
 
-        vectors: Ns = ceil_mesh + list(flat(map(self.__build_wall, wall_lines))) + floor_mesh
+        ceil_mesh: Ns = list(filter(
+            lambda tri: not any(map(lambda h: Polygon(tri[:, :2]).intersects(Polygon(h.__as_2d_pos())), shape._holes)),
+            part_ceil_tris
+        )) + list(flat(fixed_hole_tris))
+        floor_mesh: Ns = list(map(self.__build_floor_tri, part_ceil_tris if fill_holes else ceil_mesh))
+        wall_mesh: Ns = self.__tris_to_walls(part_ceil_tris if fill_holes else ceil_mesh)
+
+        ceil_poly: Polygon = self.__unite(ceil_mesh)
+        floor_poly: Polygon = self.__unite(list(map(lambda tri: tri[:, :2], floor_mesh)))
+        hole_tris: list[Ns] = [list(filter(
+            lambda tri: floor_poly.covers(Polygon(tri[:, :2])) and not ceil_poly.covers(Polygon(tri[:, :2])),
+            self.__triangulate_vectors(list(flat(tris)) + list(flat(part_ceil_tris)))
+        )) for tris, hole in zip(fixed_hole_tris, shape._holes)]
+        hole_wall_mesh: Ns = list(flat(map(lambda h_tris: self.__tris_to_walls(h_tris, max_z - min_z), hole_tris)))
+        hole_ceil_mesh: Ns = list(flat(map(
+            lambda h_tris: array(list(map(lambda tri: self.__set_zs(tri, max_z - min_z), h_tris))), hole_tris
+        )))
+
+        final_hole_mesh: Ns = list(hole_ceil_mesh) + hole_wall_mesh
+        final_mesh: Ns = list(ceil_mesh) + wall_mesh + floor_mesh + (final_hole_mesh if fill_holes else [])
 
         if type(scale) == float or type(scale) == int:
             scale: D3 = (scale, scale, scale)
 
         if scale != (1, 1, 1):
-            logger.debug(f'Scaling {len(vectors)} vectors by {scale}')
-            vectors: Ns = list(map(lambda t: array(list(map(lambda v: v * scale, t))), vectors))
+            logger.debug(f'Scaling {len(final_mesh)} vectors by {scale}')
+            final_mesh: Ns = list(map(lambda t: array(list(map(lambda v: v * scale, t))), final_mesh))
 
-        self.__mesh_from_vectors(vectors).save(temp2)
+        self.__mesh_from_vectors(final_mesh).save(temp2)
         mesh: Trimesh = load(temp2)
 
         if not keep_tmp:
             any(map(lambda t: os.remove(t), temps))
 
-        old_broken: int = len(broken_faces(mesh))
         mesh.fill_holes()
-        logger.debug('Repaired {} broken faces, mesh is {}watertight'.format(
-            old_broken - len(broken_faces(mesh)), '' if mesh.is_watertight else 'not '
-        ))
-        logger.debug(f'Final mesh consists of {len(mesh.vertices)} vertices')
+
         return mesh
 
     def get_max_keel_m(self) -> float:
@@ -399,7 +421,7 @@ class FrameGroup:
         return [FrameGroup.__update_and_return(f, idx * offset) for idx, fs in enumerate(frames_stack) for f in fs]
 
     @staticmethod
-    def __tri_to_lines(tri: Ns) -> list[tuple[D3, D3]]:
+    def __tri_to_lines(tri: ndarray) -> list[tuple[D3, D3]]:
         p1, p2, p3 = sorted(map(tuple, tri))
         return [(p1, p2), (p1, p3), (p2, p3)]
 
@@ -453,15 +475,15 @@ class FrameGroup:
             raise ValueError(f'Parameters may only be numeric if not set to "{auto}", provided "{param}"')
 
     @staticmethod
-    def __get_zs(xyzs) -> D1s:
+    def __get_zs(xyzs: D3s) -> D1s:
         return [z for _, _, z in xyzs]
 
     @staticmethod
-    def __mod_zs(xyzs, mod) -> D3s:
-        return [(x, y, mod - z) for x, y, z in xyzs]
+    def __mod_zs(xyzs: D3s, mod: float, add: bool = False) -> D3s:
+        return [(x, y, mod + z if add else mod - z) for x, y, z in xyzs]
 
     @staticmethod
-    def __set_zs(xyzs, new_z) -> D3s:
+    def __set_zs(xyzs: D3s, new_z: float) -> D3s:
         return [(x, y, new_z) for x, y, z in xyzs]
 
     @staticmethod
@@ -469,19 +491,50 @@ class FrameGroup:
         return array([(x, y, 0) for x, y, _ in tri])
 
     @staticmethod
-    def __update_tri(tri: ndarray, z_mod: float):
-        return array([(x, y, z + z_mod) for x, y, z in tri])
-
-    @staticmethod
-    def __build_wall(ps: D3s) -> Ns:
-        pfs: D3s = [(x, y, 0) for x, y, _ in ps]
-        return FrameGroup.__square_to_triangle((*ps, *pfs))
+    def __build_wall(points: tuple[D3, D3], z: float = 0) -> Ns:
+        pms: D3s = [(x, y, z) for x, y, _ in points]
+        return FrameGroup.__square_to_triangle((*points, *pms))
 
     @staticmethod
     def __mesh_from_vectors(vectors: Ns) -> Mesh:
         data: ndarray = zeros(len(vectors), dtype=Mesh.dtype)
         data['vectors']: list[ndarray] = vectors
         return Mesh(data, remove_empty_areas=True)
+
+    @staticmethod
+    def __tris_to_walls(vectors: Ns, z: float = 0) -> Ns:
+        wall_lines: list[tuple[D3, D3]] = list(flat(map(lambda tri: FrameGroup.__tri_to_lines(tri), vectors)))
+        unique_wall_lines: list[tuple[D3, D3]] = [k for k, v in Counter(wall_lines).items() if v == 1]
+        return list(flat(map(lambda l: FrameGroup.__build_wall(l, z), unique_wall_lines)))
+
+    @staticmethod
+    def __unite(tris: Ns) -> Polygon:
+        poly: Polygon = Polygon()
+
+        for tri in tris:
+            poly: Polygon = poly.union(Polygon(tri))
+
+        return poly
+
+    @staticmethod
+    def __fix_tri(tri: ndarray, fixed_points: D3s, hole_poly: Polygon) -> Ns:
+        exterior_points: D3s = list(map(tuple, filter(lambda p: not Point(p[:2]).intersects(hole_poly), tri)))
+        return list(filter(
+            lambda t_tri: not hole_poly.covers(Polygon(t_tri[:, :2])),
+            FrameGroup.__triangulate_vectors(list(exterior_points) + fixed_points)
+        ))
+
+    @staticmethod
+    def __calc_hole_points(tri: ndarray, hole: D2s) -> D3s:
+        inters: LineString | MultiLineString = LinearRing(hole).intersection(Polygon(tri[:, :2]))
+        inter_points: D2s = list(inters.coords) if type(inters) == LineString else list(flat(map(
+            lambda geom: list(geom.coords), inters.geoms
+        )))
+        p1, p2, p3 = tri
+        normal: ndarray = cross(p2 - p1, p3 - p1)
+        a, b, c = normal
+        d: float = normal.dot(p1)
+        return [(x, y, (d - a * x - b * y) / c) for x, y in inter_points]
 
     @staticmethod
     def __square_to_triangle(points: tuple[D3, D3, D3, D3]) -> Ns:
@@ -495,12 +548,9 @@ class FrameGroup:
         delaunay: dict = triangulate({'vertices': points}, opts='')
         vertices: D2s = delaunay['vertices']
         triangles: I3s = delaunay['triangles']
-        mask: Optional[list[bool]] = None
-
-        if shape:
-            mask: list[bool] = list(map(
-                lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: (vertices[i]), idxs)))), triangles
-            ))
+        mask: Optional[list[bool]] = None if not shape else list(map(
+            lambda idxs: not shape.is_interior(Polygon(list(map(lambda i: (vertices[i]), idxs)))), triangles
+        ))
 
         return Triangulation(*list(zip(*vertices)), triangles=triangles, mask=mask)
 

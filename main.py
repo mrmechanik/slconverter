@@ -68,7 +68,7 @@ def main() -> None:
     plt.show()
     logger.info('Plotting completed')
 
-    save_stl('data/res.stl', group.as_exportable(shape))
+    save_stl('data/res.stl', group.as_exportable(shape, fill_holes=True, scale=30))
 
 
 if __name__ == '__main__':
